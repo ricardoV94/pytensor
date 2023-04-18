@@ -3,7 +3,7 @@ import warnings
 from numpy.random import Generator, RandomState
 
 from pytensor.compile.sharedvalue import SharedVariable, shared
-from pytensor.graph.basic import Constant
+from pytensor.graph.basic import Constant, Variable
 from pytensor.link.basic import JITLinker
 
 
@@ -62,6 +62,11 @@ class JAXLinker(JITLinker):
             n for n, i in enumerate(self.fgraph.inputs) if isinstance(i, Constant)
         ]
         return jax.jit(fn, static_argnums=static_argnums)
+
+    def typify(self, var: Variable):
+        from pytensor.link.jax.dispatch import jax_typify
+
+        return jax_typify(var.type)
 
     def create_thunk_inputs(self, storage_map):
         from pytensor.link.jax.dispatch import jax_typify
