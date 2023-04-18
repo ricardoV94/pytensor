@@ -4,8 +4,8 @@ import scipy.sparse
 
 import pytensor.sparse as ps
 import pytensor.tensor as pt
-from pytensor import function
-from pytensor.graph import FunctionGraph
+from pytensor.graph import Constant, FunctionGraph
+from pytensor.tensor.type import DenseTensorType
 from tests.link.jax.test_basic import compare_jax_and_py
 
 
@@ -19,57 +19,62 @@ from tests.link.jax.test_basic import compare_jax_and_py
         # structured_dot only allows matrix @ matrix
         (ps.structured_dot, pt.matrix, ps.matrix),
         (ps.structured_dot, ps.matrix, pt.matrix),
+        (ps.structured_dot, ps.matrix, ps.matrix),
     ],
 )
-def test_sparse_dot_constant_sparse(x_type, y_type, op):
+@pytest.mark.parametrize("x_constant", (False, True))
+@pytest.mark.parametrize("y_constant", (False, True))
+def test_sparse_dot(x_type, y_type, op, x_constant, y_constant):
     inputs = []
     test_values = []
 
     if x_type is ps.matrix:
-        x_sp = scipy.sparse.random(5, 40, density=0.25, format="csr", dtype="float32")
-        x_pt = ps.as_sparse_variable(x_sp, name="x")
+        x_test = scipy.sparse.random(5, 40, density=0.25, format="csr", dtype="float32")
+        x_pt = ps.as_sparse_variable(x_test, name="x")
     else:
-        x_pt = x_type("x", dtype="float32")
-        if x_pt.ndim == 1:
+        if x_type is pt.vector:
             x_test = np.arange(40, dtype="float32")
         else:
             x_test = np.arange(5 * 40, dtype="float32").reshape(5, 40)
+        x_pt = pt.as_tensor_variable(x_test, name="x")
+    assert isinstance(x_pt, Constant)
+
+    if not x_constant:
+        x_pt = x_pt.type(name="x")
         inputs.append(x_pt)
         test_values.append(x_test)
 
     if y_type is ps.matrix:
-        y_sp = scipy.sparse.random(40, 3, density=0.25, format="csc", dtype="float32")
-        y_pt = ps.as_sparse_variable(y_sp, name="y")
+        y_test = scipy.sparse.random(40, 3, density=0.25, format="csc", dtype="float32")
+        y_pt = ps.as_sparse_variable(y_test, name="y")
     else:
-        y_pt = y_type("y", dtype="float32")
-        if y_pt.ndim == 1:
+        if y_type is pt.vector:
             y_test = np.arange(40, dtype="float32")
         else:
             y_test = np.arange(40 * 3, dtype="float32").reshape(40, 3)
+        y_pt = pt.as_tensor_variable(y_test, name="y")
+    assert isinstance(y_pt, Constant)
+
+    if not y_constant:
+        y_pt = y_pt.type(name="y")
         inputs.append(y_pt)
         test_values.append(y_test)
 
     dot_pt = op(x_pt, y_pt)
     fgraph = FunctionGraph(inputs, [dot_pt])
-    compare_jax_and_py(fgraph, test_values)
 
+    def assert_fn(x, y):
+        [x] = x
+        [y] = y
+        if hasattr(x, "todense"):
+            x = x.todense()
+        if hasattr(y, "todense"):
+            y = y.todense()
+        np.testing.assert_allclose(x, y)
 
-def test_sparse_dot_non_const_raises():
-    x_pt = pt.vector("x")
-
-    y_sp = scipy.sparse.random(40, 3, density=0.25, format="csc", dtype="float32")
-    y_pt = ps.as_sparse_variable(y_sp, name="y").type()
-
-    out = ps.dot(x_pt, y_pt)
-
-    msg = "JAX sparse dot only implemented for constant sparse inputs"
-
-    with pytest.raises(NotImplementedError, match=msg):
-        function([x_pt, y_pt], out, mode="JAX")
-
-    y_pt_shared = ps.shared(y_sp, name="y")
-
-    out = ps.dot(x_pt, y_pt_shared)
-
-    with pytest.raises(NotImplementedError, match=msg):
-        function([x_pt], out, mode="JAX")
+    compare_jax_and_py(
+        fgraph,
+        test_values,
+        must_be_device_array=isinstance(dot_pt.type, DenseTensorType),
+        assert_fn=assert_fn,
+    )
