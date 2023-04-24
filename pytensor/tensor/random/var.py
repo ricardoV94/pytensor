@@ -2,7 +2,7 @@ import copy
 
 import numpy as np
 
-from pytensor.compile.sharedvalue import SharedVariable, shared_constructor
+from pytensor.compile.sharedvalue import MultiBackendSharedVariable, shared_constructor, SharedVariable
 from pytensor.tensor.random.type import random_generator_type, random_state_type
 
 
@@ -11,7 +11,7 @@ class RandomStateSharedVariable(SharedVariable):
         return self.name or f"RandomStateSharedVariable({repr(self.container)})"
 
 
-class RandomGeneratorSharedVariable(SharedVariable):
+class RandomGeneratorSharedVariable(MultiBackendSharedVariable):
     def __str__(self):
         return self.name or "RandomGeneratorSharedVariable({})".format(
             repr(self.container)

@@ -1611,7 +1611,7 @@ class FunctionMaker:
                     )
                 input_storage_lists.append(input_storage_i.storage)
 
-                storage = input_storage[i].storage[0]
+                storage = input_storage[i].__get__()
 
             else:
                 # Normal case: one new, independent storage unit

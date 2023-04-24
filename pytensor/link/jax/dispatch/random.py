@@ -65,23 +65,8 @@ def jax_typify_Generator(rng, **kwargs):
     state["bit_generator"] = numpy_bit_gens[state["bit_generator"]]
 
     # XXX: Is this a reasonable approach?
-    state["jax_state"] = _coerce_to_uint32_array(state["state"]["state"])[0:2]
-
-    # The "state" and "inc" values in a NumPy `Generator` are 128 bits, which
-    # JAX can't handle, so we split these values into arrays of 32 bit integers
-    # and then combine the first two into a single 64 bit integers.
-    #
-    # XXX: Depending on how we expect these values to be used, is this approach
-    # reasonable?
-    #
-    # TODO: We might as well remove these altogether, since this conversion
-    # should only occur once (e.g. when the graph is converted/JAX-compiled),
-    # and, from then on, we use the custom "jax_state" value.
-    inc_32 = _coerce_to_uint32_array(state["state"]["inc"])
-    state_32 = _coerce_to_uint32_array(state["state"]["state"])
-    state["state"]["inc"] = inc_32[0] << 32 | inc_32[1]
-    state["state"]["state"] = state_32[0] << 32 | state_32[1]
-    return state["jax_state"]
+    jax_state = _coerce_to_uint32_array(state["state"]["state"])[0:2]
+    return jax_state
 
 
 class RandomPRNGKeyType(RandomType[jax.random.PRNGKey]):
@@ -103,6 +88,12 @@ class RandomPRNGKeyType(RandomType[jax.random.PRNGKey]):
             raise TypeError()
 
         return jax_typify(data)
+
+
+    @staticmethod
+    def convert_to_default(data):
+        """Convert custom type data back to default type."""
+        return np.random.default_rng(data)
 
 
 random_prng_key_type = RandomPRNGKeyType()

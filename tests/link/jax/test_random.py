@@ -69,9 +69,8 @@ def test_random_RandomStream():
     assert not np.array_equal(jax_res_1, jax_res_2)
 
 
-@pytest.mark.parametrize("rng_ctor", (np.random.RandomState, np.random.default_rng))
-def test_random_updates(rng_ctor):
-    original_value = rng_ctor(seed=98)
+def test_random_state_updates(rng_ctor):
+    original_value = np.random.RandomState(seed=98)
     rng = shared(original_value, name="original_rng", borrow=False)
     next_rng, x = at.random.normal(name="x", rng=rng).owner.outputs
 
@@ -89,6 +88,25 @@ def test_random_updates(rng_ctor):
         a == b if not isinstance(a, np.ndarray) else np.array_equal(a, b)
         for a, b in zip(rng.get_value().__getstate__(), original_value.__getstate__())
     )
+
+
+def test_random_generator_updates():
+    original_value = np.random.default_rng(seed=98)
+    rng = shared(original_value, name="rng")
+    next_rng, x = at.random.normal(name="x", rng=rng).owner.outputs
+
+    f_jax = pytensor.function([], [x], updates={rng: next_rng}, mode=jax_mode)
+    assert f_jax() != f_jax()
+
+    # Without updateds f_py is the same across evaluations
+    f_py = pytensor.function([], [x])
+    assert f_py() == f_py()
+
+    # Calling jax in between py calls, leads to different results as the shared variable was updated
+    r1 = f_py()
+    f_jax()
+    r2 = f_py()
+    assert r1 != r2
 
 
 @pytest.mark.parametrize(

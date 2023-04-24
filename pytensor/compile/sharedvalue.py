@@ -1,5 +1,5 @@
 """Provide a simple user friendly API to PyTensor-managed memory."""
-
+import builtins
 import copy
 from contextlib import contextmanager
 from functools import singledispatch
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 from pytensor.graph.basic import Variable
 from pytensor.graph.utils import add_tag_trace
-from pytensor.link.basic import Container
+from pytensor.link.basic import Container, MultiBackendContainer
 from pytensor.link.c.type import generic
 
 
@@ -165,6 +165,98 @@ class SharedVariable(Variable):
             self._default_update = self.type.filter_variable(value, allow_convert=True)
         else:
             self._default_update = value
+
+
+class MultiBackendSharedVariable(SharedVariable):
+
+    def __init__(
+        self,
+        type: "Type",
+        value,
+        strict: bool,
+        allow_downcast=None,
+        container: Optional[Container] = None,
+        name: Optional[str] = None,
+    ):
+        r"""
+        Parameters
+        ----------
+        type
+            The `Type` for this variable (see `Variable`).
+        value
+            A value to associate with this variable (a new container will be
+            created).
+        strict
+            ``True`` means that values assigned to this variable will not be
+            cast or copied, so they must have the correct `Type`\s.
+        allow_downcast
+            Only applies if `strict` is ``False``.
+            ``True`` means that the assigned value can lose precision when cast
+            during assignment. ``None`` means that only down-casting of a Python
+            float to a scalar ``floatX`` is allowed.
+        container
+            The container to use for this variable. Illegal to pass this as well as
+            a value.
+        name
+            The name for this variable (see `Variable`).
+
+        """
+        Variable.__init__(self, type=type, owner=None, index=None, name=name)
+
+        if container is not None:
+            if not isinstance(container, MultiBackendContainer):
+                raise TypeError(
+                    f"{self} requires a MultiBackendContainer"
+                )
+            self.container = container
+            if (value is not None) or (strict is not None):
+                raise TypeError(
+                    "value and strict are ignored if you pass a container here"
+                )
+        else:
+            self.container = MultiBackendContainer(
+                self,
+                storage={
+                    builtins.type(type): type.filter(value, strict=strict, allow_downcast=allow_downcast)
+                },
+                readonly=False,
+                strict=strict,
+                allow_downcast=allow_downcast,
+            )
+
+        global __SHARED_CONTEXT__
+
+        if isinstance(__SHARED_CONTEXT__, list):
+            __SHARED_CONTEXT__.append(self)
+
+        self._default_update: Optional[Variable] = None
+
+    def get_value(self, type_=None, *, borrow=False):
+        """
+        Get the non-symbolic value associated with this SharedVariable.
+
+        Parameters
+        ----------
+        type_: type
+            The backend type to borrow
+        borrow : bool
+            True to permit returning of an object aliased to internal memory.
+
+        Only with borrow=False and return_internal_type=True does this function
+        guarantee that you actually get the internal object.
+        But in that case, you may get different return types when using
+        different compute devices.
+
+        """
+        if borrow:
+            # TODO: Add warning that modifying this value may not modify the inner value
+            #  If a read/write on another backend type is done in the meantime
+            return self.container.__get__(type_)
+        else:
+            return copy.deepcopy(self.container.__get__(type_))
+
+    def get_test_value(self):
+        return self.get_value(borrow=True, type_=self.container.default_backend_type)
 
 
 def shared(value, name=None, strict=False, allow_downcast=None, **kwargs):

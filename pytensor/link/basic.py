@@ -150,6 +150,97 @@ class Container:
         return r
 
 
+class MultiBackendContainer(Container):
+    """A subclass of Container that allows storing and loading equivalent values from multiple backends.
+
+    The stored types must know how to convert a value among different backends
+    """
+
+    def __init__(
+        self,
+        r: Union[Variable, Type],
+        storage: Dict,
+        *,
+        readonly: bool = False,
+        strict: bool = False,
+        allow_downcast: Optional[bool] = None,
+        name: Optional[str] = None,
+        ) -> None:
+            if not isinstance(storage, dict):
+                raise TypeError("storage must be a dict")
+            if isinstance(r, Variable):
+                r = r.type
+
+            if name is None:
+                # Some Type do not have a name field.
+                self.name = getattr(r, "name", None)
+            else:
+                self.name = name
+
+            self.storage = storage
+            self.readonly = readonly
+            self.strict = strict
+            self.allow_downcast = allow_downcast
+            self.default_type = r
+            self.last_access_type = type(r)
+
+    def __repr__(self):
+        if len(self.storage) == 1:
+            content = tuple(self.storage.values())[0]
+        else:
+            content = {key.__name__: value for key, value in self.storage.items()}
+        return "<" + repr(content) + ">"
+
+    def __get__(self, type_=None) -> Any:
+        if type_ is None:
+            type_ = self.default_type
+
+        if not isinstance(type_, self.last_access_type):
+            last_access_value = self.storage[self.last_access_type]
+            # Every specialized backend type should know how to convert from the default type to itself
+            if isinstance(self.default_type, self.last_access_type):
+                value = type_.filter(last_access_value, strict=False)
+            else:
+                # Every specialized backend type should know how to convert from itself back to the default type
+                default_type = self.last_access_type.convert_to_default(last_access_value)
+                value = type_.filter(default_type, strict=False)
+            self.storage[type(type_)] = value
+            self.last_access_type = type(type_)
+        return self.storage[type(type_)]
+
+    def __set__(self, value: Any) -> None:
+        if self.readonly:
+            raise Exception(f"Cannot set readonly storage: {self.name}")
+        try:
+            # TODO: When is this used?
+            if value is None:
+                self.container = {}
+                self.last_access_type = None
+                return
+
+            kwargs = {}
+            if self.strict:
+                kwargs["strict"] = True
+            if self.allow_downcast is not None:
+                kwargs["allow_downcast"] = self.allow_downcast
+
+            type_ = type(value)
+
+            try:
+                # Use in-place filtering when/if possible
+                self.storage[type_] = self.type.filter_inplace(
+                    value, self.storage[type_], **kwargs
+                )
+            except NotImplementedError:
+                self.storage[type_] = self.type.filter(type_, **kwargs)
+
+        except Exception as e:
+            e.args = e.args + (f'Container name "{self.name}"',)
+            raise
+
+        self.last_access_type = type_
+
+
 class Linker(ABC):
     """
     Base type for all linkers.

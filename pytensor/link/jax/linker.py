@@ -12,35 +12,34 @@ class JAXLinker(JITLinker):
 
     def fgraph_convert(self, fgraph, input_storage, storage_map, **kwargs):
         from pytensor.link.jax.dispatch import jax_funcify
-        from pytensor.tensor.random.type import RandomType
+        from pytensor.tensor.random.type import RandomStateType
 
-        shared_rng_inputs = [
+        shared_randomstate_inputs = [
             inp
             for inp in fgraph.inputs
-            if (isinstance(inp, SharedVariable) and isinstance(inp.type, RandomType))
+            if (isinstance(inp, SharedVariable) and isinstance(inp.type, RandomStateType))
         ]
 
-        # Replace any shared RNG inputs so that their values can be updated in place
-        # without affecting the original RNG container. This is necessary because
-        # JAX does not accept RandomState/Generators as inputs, and they will have to
-        # be typyfied
-        if shared_rng_inputs:
+        # Replace any shared RandomState inputs so that their values can be updated in place
+        # without affecting the original container. This is necessary because these
+        # do not contain MultiBackendContainers. Shared Generators OTOH are fine.
+        if shared_randomstate_inputs:
             warnings.warn(
-                f"The RandomType SharedVariables {shared_rng_inputs} will not be used "
+                f"The RandomStateType SharedVariables {shared_randomstate_inputs} will not be used "
                 f"in the compiled JAX graph. Instead a copy will be used.",
                 UserWarning,
             )
             new_shared_rng_inputs = [
-                shared(inp.get_value(borrow=False)) for inp in shared_rng_inputs
+                shared(inp.get_value(borrow=False)) for inp in shared_randomstate_inputs
             ]
 
             fgraph.replace_all(
-                zip(shared_rng_inputs, new_shared_rng_inputs),
+                zip(shared_randomstate_inputs, new_shared_rng_inputs),
                 import_missing=True,
                 reason="JAXLinker.fgraph_convert",
             )
 
-            for old_inp, new_inp in zip(shared_rng_inputs, new_shared_rng_inputs):
+            for old_inp, new_inp in zip(shared_randomstate_inputs, new_shared_rng_inputs):
                 new_inp_storage = [new_inp.get_value(borrow=True)]
                 storage_map[new_inp] = new_inp_storage
                 old_inp_storage = storage_map.pop(old_inp)
