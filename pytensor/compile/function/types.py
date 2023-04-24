@@ -1026,7 +1026,10 @@ class Function:
                 list(zip(self.maker.expanded_inputs, self.input_storage))
             ):
                 if input.update is not None:
-                    storage.data = outputs.pop()
+                    # FIXME
+                    type_ = self.maker.linker.typify(input.variable).type
+                    storage.__set__(outputs.pop(), type_=type_)
+                    # storage.__set__(outputs.pop())
         else:
             outputs = outputs[: self.n_returned_outputs]
 

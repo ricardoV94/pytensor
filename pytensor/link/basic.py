@@ -208,7 +208,7 @@ class MultiBackendContainer(Container):
             self.last_access_type = type(type_)
         return self.storage[type(type_)]
 
-    def __set__(self, value: Any) -> None:
+    def __set__(self, value: Any, type_=None) -> None:
         if self.readonly:
             raise Exception(f"Cannot set readonly storage: {self.name}")
         try:
@@ -224,21 +224,19 @@ class MultiBackendContainer(Container):
             if self.allow_downcast is not None:
                 kwargs["allow_downcast"] = self.allow_downcast
 
-            type_ = type(value)
-
             try:
                 # Use in-place filtering when/if possible
-                self.storage[type_] = self.type.filter_inplace(
-                    value, self.storage[type_], **kwargs
+                self.storage[type(type_)] = type_.filter_inplace(
+                    value, self.storage[type(type_)], **kwargs
                 )
             except NotImplementedError:
-                self.storage[type_] = self.type.filter(type_, **kwargs)
+                self.storage[type(type_)] = type_.filter(value, **kwargs)
 
         except Exception as e:
             e.args = e.args + (f'Container name "{self.name}"',)
             raise
 
-        self.last_access_type = type_
+        self.last_access_type = type(type_)
 
 
 class Linker(ABC):
@@ -760,7 +758,8 @@ class JITLinker(PerformLinker):
             thunk_inputs=thunk_inputs,
             thunk_outputs=thunk_outputs,
         ):
-            outputs = fgraph_jit(*[x[0] for x in thunk_inputs])
+
+            outputs = fgraph_jit(*[x()[0] for x in thunk_inputs])
 
             for o_var, o_storage, o_val in zip(fgraph.outputs, thunk_outputs, outputs):
                 compute_map[o_var][0] = True
@@ -829,7 +828,7 @@ class JITLinker(PerformLinker):
         return (
             fn,
             [
-                Container(self.typify(input), storage)
+                Container(self.typify(input), storage) if not hasattr(input, "container") else type(input.container)(self.typify(input), storage)
                 for input, storage in zip(fgraph.inputs, input_storage)
             ],
             [

@@ -93,7 +93,7 @@ class RandomPRNGKeyType(RandomType[jax.random.PRNGKey]):
     @staticmethod
     def convert_to_default(data):
         """Convert custom type data back to default type."""
-        return np.random.default_rng(data)
+        return np.random.default_rng(np.asarray(data))
 
 
 random_prng_key_type = RandomPRNGKeyType()

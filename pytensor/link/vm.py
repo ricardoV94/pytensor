@@ -1072,7 +1072,7 @@ class VMLinker(LocalLinker):
             for var, i in vars_idx.items():
                 vars_idx_inv[i] = var
 
-            # put storage_map and compute_map into a int-based scheme
+            # put storage_map and compute_map into an int-based scheme
             storage_map_list = [
                 storage_map[vars_idx_inv[i]] for i in range(len(vars_idx_inv))
             ]

@@ -167,7 +167,7 @@ def streamline(
         (same order as thunks).
     post_thunk_old_storage
         A list (corresponding to thunks, order) whose elements are lists of
-        storage cells, that should be cleared after running thecorresponding
+        storage cells, that should be cleared after running the corresponding
         thunk. A value of None disables this functionality.
     no_recycling
         Storage elements that cannot be 'recycled' by repeatedly executing the
@@ -749,6 +749,9 @@ def fgraph_to_python(
             input_storage = storage_map.setdefault(
                 i, [None if not isinstance(i, Constant) else i.data]
             )
+            if isinstance(input_storage, dict):
+                # FIXME
+                input_storage = (tuple(input_storage.values())[0],)
             if input_storage[0] is not None or isinstance(i, Constant):
                 # Constants need to be assigned locally and referenced
                 global_env[local_input_name] = type_conversion_fn(

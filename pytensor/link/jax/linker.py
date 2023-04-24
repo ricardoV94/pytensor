@@ -2,7 +2,7 @@ import warnings
 
 from numpy.random import Generator, RandomState
 
-from pytensor.compile.sharedvalue import SharedVariable, shared
+from pytensor.compile.sharedvalue import SharedVariable, shared, MultiBackendSharedVariable
 from pytensor.graph.basic import Constant, Variable
 from pytensor.link.basic import JITLinker
 
@@ -72,12 +72,16 @@ class JAXLinker(JITLinker):
 
         thunk_inputs = []
         for n in self.fgraph.inputs:
-            sinput = storage_map[n]
-            if isinstance(sinput[0], (RandomState, Generator)):
-                new_value = jax_typify(
-                    sinput[0], dtype=getattr(sinput[0], "dtype", None)
-                )
-                sinput[0] = new_value
+            if isinstance(n, MultiBackendSharedVariable):
+                backend_type = self.typify(n).type
+                sinput = lambda: [n.get_value(type_=backend_type, borrow=True)]
+            else:
+                sinput = lambda: [storage_map[n]]
+            # if isinstance(sinput[0], (RandomState, Generator)):
+            #     new_value = jax_typify(
+            #         sinput[0], dtype=getattr(sinput[0], "dtype", None)
+            #     )
+            #     sinput[0] = new_value
             thunk_inputs.append(sinput)
 
         return thunk_inputs
