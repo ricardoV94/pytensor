@@ -8,6 +8,7 @@ from numpy.core.multiarray import normalize_axis_index
 
 import pytensor
 import pytensor.scalar.basic as aes
+from pytensor import config
 from pytensor.gradient import (
     DisconnectedType,
     _float_zeros_like,
@@ -1598,24 +1599,25 @@ def broadcast_shape_iter(
                     aes.get_scalar_type(dtype=v.dtype)()
                     for v in scalar_maybe_non_bcast_shapes
                 ]
-                non_bcast_vec = [
-                    aes.switch(aes.eq(nbv, 1), -one_at, nbv)
-                    for nbv in dummy_maybe_non_bcast_shapes
-                ]
-                dim_max = aes.abs(reduce(aes.scalar_maximum, non_bcast_vec))
-                dim_max_op = Composite(dummy_maybe_non_bcast_shapes, [dim_max])
+                with config.change_flags(compute_test_value="off"):
+                    non_bcast_vec = [
+                        aes.switch(aes.eq(nbv, 1), -one_at, nbv)
+                        for nbv in dummy_maybe_non_bcast_shapes
+                    ]
+                    dim_max = aes.abs(reduce(aes.scalar_maximum, non_bcast_vec))
+                    dim_max_op = Composite(dummy_maybe_non_bcast_shapes, [dim_max])
 
-                dummy_dim_max = dim_max_op(*dummy_maybe_non_bcast_shapes)
+                    dummy_dim_max = dim_max_op(*dummy_maybe_non_bcast_shapes)
 
-                assert_dim = Assert("Could not broadcast dimensions")
-                assert_cond = reduce(
-                    aes.and_,
-                    (
-                        aes.or_(aes.eq(nbv, -one_at), aes.eq(nbv, dummy_dim_max))
-                        for nbv in non_bcast_vec
-                    ),
-                )
-                assert_cond_op = Composite(dummy_maybe_non_bcast_shapes, [assert_cond])
+                    assert_dim = Assert("Could not broadcast dimensions")
+                    assert_cond = reduce(
+                        aes.and_,
+                        (
+                            aes.or_(aes.eq(nbv, -one_at), aes.eq(nbv, dummy_dim_max))
+                            for nbv in non_bcast_vec
+                        ),
+                    )
+                    assert_cond_op = Composite(dummy_maybe_non_bcast_shapes, [assert_cond])
 
                 bcast_dim = assert_dim(
                     dim_max_op(*scalar_maybe_non_bcast_shapes),

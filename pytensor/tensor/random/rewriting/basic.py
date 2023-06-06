@@ -1,4 +1,4 @@
-from itertools import zip_longest
+from itertools import zip_longest, groupby, chain
 
 from pytensor.compile import optdb
 from pytensor.configdefaults import config
@@ -18,7 +18,7 @@ from pytensor.tensor.subtensor import (
     Subtensor,
     as_index_variable,
     get_idx_list,
-    indexed_result_shape,
+    indexed_result_shape, group_indices,
 )
 from pytensor.tensor.type_other import SliceType
 
@@ -224,23 +224,23 @@ def local_subtensor_rv_lift(fgraph, node):
     # Parse indices
     idx_list = getattr(st_op, "idx_list", None)
     if idx_list:
-        cdata = get_idx_list(node.inputs, idx_list)
+        idx_vars = get_idx_list(node.inputs, idx_list)
     else:
-        cdata = node.inputs[1:]
-    st_indices, st_is_bool = zip(
+        idx_vars = node.inputs[1:]
+    indices, indices_is_bool = zip(
         *tuple(
-            (as_index_variable(i), getattr(i, "dtype", None) == "bool") for i in cdata
+            (as_index_variable(idx_var), getattr(idx_var, "dtype", None) == "bool") for idx_var in idx_vars
         )
     )
 
     # Check that indexing does not act on support dims
     batched_ndims = rv.ndim - rv_op.ndim_supp
-    if len(st_indices) > batched_ndims:
+    if len(indices) > batched_ndims:
         # If the last indexes are just dummy `slice(None)` we discard them
-        st_is_bool = st_is_bool[:batched_ndims]
-        st_indices, supp_indices = (
-            st_indices[:batched_ndims],
-            st_indices[batched_ndims:],
+        indices_is_bool = indices_is_bool[:batched_ndims]
+        indices, supp_indices = (
+            indices[:batched_ndims],
+            indices[batched_ndims:],
         )
         for index in supp_indices:
             if not (
@@ -260,24 +260,25 @@ def local_subtensor_rv_lift(fgraph, node):
     # if hasattr(fgraph, "shape_feature"):
     #     output_shape = fgraph.shape_feature.shape_of(node.outputs[0])
     # else:
-    output_shape_ignoring_bool = indexed_result_shape(rv.shape, st_indices)
-    new_size_ignoring_boolean = (
-        output_shape_ignoring_bool
+    non_bool_indices = chain.from_iterable(index.nonzero() if is_bool else (index,) for index, is_bool in zip(indices, indices_is_bool))
+    new_shape_ignoring_bool = indexed_result_shape(rv.shape, tuple(non_bool_indices))
+    new_size_ignoring_bool = (
+        new_shape_ignoring_bool
         if rv_op.ndim_supp == 0
-        else output_shape_ignoring_bool[: -rv_op.ndim_supp]
+        else new_shape_ignoring_bool[: -rv_op.ndim_supp]
     )
 
     # Boolean indices can actually change the `size` value (compared to just *which* dimensions of `size` are used).
     # The `indexed_result_shape` helper does not consider this
-    if any(st_is_bool):
+    if any(indices_is_bool):
         new_size = tuple(
-            at_sum(idx) if is_bool else s
-            for s, is_bool, idx in zip_longest(
-                new_size_ignoring_boolean, st_is_bool, st_indices, fillvalue=False
+            at_sum(index) if is_bool else dim_size
+            for dim_size, is_bool, index in zip_longest(
+                new_size_ignoring_bool, indices_is_bool, indices, fillvalue=False
             )
         )
     else:
-        new_size = new_size_ignoring_boolean
+        new_size = new_size_ignoring_bool
 
     # Update the parameters to reflect the indexed dimensions
     new_dist_params = []
@@ -285,14 +286,32 @@ def local_subtensor_rv_lift(fgraph, node):
         # Apply indexing on the batched dimensions of the parameter
         batched_param_dims_missing = batched_ndims - (param.ndim - param_ndim_supp)
         batched_param = shape_padleft(param, batched_param_dims_missing)
-        batched_st_indices = []
-        for st_index, batched_param_shape in zip(st_indices, batched_param.type.shape):
+        batched_indices = []
+        i_batched_dim = 0
+        for index, is_bool in zip(indices, indices_is_bool):
             # If we have a degenerate dimension indexing it should always do the job
-            if batched_param_shape == 1:
-                batched_st_indices.append(0)
+            # With this special logic we don't have to broadcast parameters just to index them
+            if is_bool and index.type.ndim > 1:
+                batched_param_sub_shape = batched_param.type.shape[i_batched_dim: i_batched_dim + index.type.ndim]
+                if any(dim_size == 1 for dim_size in batched_param_sub_shape):
+                    # Not ideal, but in this case we need to convert boolean mask to advanced integer indexing,
+                    # So we can handle degenerate dims
+                    nonzero_idx = [0 if dim_size == 1 else nonzero for dim_size, nonzero in zip(batched_param_sub_shape, index.nonzero())]
+                    batched_indices.extend(nonzero_idx)
+                else:
+                    batched_indices.append(index)
+                i_batched_dim += index.type.ndim
             else:
-                batched_st_indices.append(st_index)
-        new_dist_params.append(batched_param[tuple(batched_st_indices)])
+                if batched_param.type.shape[i_batched_dim] == 1:
+                    batched_indices.append(0)
+                else:
+                    batched_indices.append(index)
+                i_batched_dim += 1
+        new_dist_params.append(batched_param[tuple(batched_indices)])
+
+    print("")
+    import pytensor
+    pytensor.dprint([pytensor.tensor.as_tensor(new_size), *new_dist_params], print_type=True)
 
     # Create new RV
     new_node = rv_op.make_node(rng, new_size, dtype, *new_dist_params)

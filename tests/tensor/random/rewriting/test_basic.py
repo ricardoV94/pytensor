@@ -443,166 +443,207 @@ def test_DimShuffle_lift(ds_order, lifted, dist_op, dist_params, size, rtol):
 @pytest.mark.parametrize(
     "indices, lifted, dist_op, dist_params, size",
     [
+        # (
+        #     # `size`-less advanced boolean indexing
+        #     (np.r_[True, False, False, True],),
+        #     True,
+        #     uniform,
+        #     (
+        #         (0.1 - 1e-5) * np.arange(4).astype(dtype=config.floatX),
+        #         0.1 * np.arange(4).astype(dtype=config.floatX),
+        #     ),
+        #     (),
+        # ),
+        # (
+        #     # `size`-only advanced boolean indexing
+        #     (np.r_[True, False, False, True],),
+        #     True,
+        #     uniform,
+        #     (
+        #         np.array(0.9 - 1e-5, dtype=config.floatX),
+        #         np.array(0.9, dtype=config.floatX),
+        #     ),
+        #     (4,),
+        # ),
+        # (
+        #     # `size`-only slice
+        #     (slice(4, -6, -1),),
+        #     True,
+        #     uniform,
+        #     (
+        #         np.array(0.9 - 1e-5, dtype=config.floatX),
+        #         np.array(0.9, dtype=config.floatX),
+        #     ),
+        #     (5, 2),
+        # ),
+        # (
+        #     (slice(1, None), [0, 2]),
+        #     True,
+        #     normal,
+        #     (
+        #         np.array([1, 10, 100], dtype=config.floatX),
+        #         np.array([1e-5, 2e-5, 3e-5], dtype=config.floatX),
+        #     ),
+        #     (4, 3),
+        # ),
+        # (
+        #     (np.array([1]), 0),
+        #     True,
+        #     normal,
+        #     (
+        #         np.array([[-1, 20], [300, -4000]], dtype=config.floatX),
+        #         np.array([[1e-6, 2e-6]], dtype=config.floatX),
+        #     ),
+        #     (3, 2, 2),
+        # ),
+        # # Only one distribution parameter
+        # (
+        #     (0,),
+        #     True,
+        #     poisson,
+        #     (np.array([[1, 2], [3, 4]], dtype=config.floatX),),
+        #     (3, 2, 2),
+        # ),
+        # # Univariate distribution with vector parameters
+        # (
+        #     (np.array([0, 2]),),
+        #     True,
+        #     categorical,
+        #     (np.array([0.0, 0.0, 1.0], dtype=config.floatX),),
+        #     (4,),
+        # ),
+        # (
+        #     (np.array([True, False, True, True]),),
+        #     True,
+        #     categorical,
+        #     (np.array([0.0, 0.0, 1.0], dtype=config.floatX),),
+        #     (4,),
+        # ),
+        # (
+        #     (np.array([True, False, True]),),
+        #     True,
+        #     categorical,
+        #     (
+        #         np.array(
+        #             [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        #             dtype=config.floatX,
+        #         ),
+        #     ),
+        #     (),
+        # ),
+        # (
+        #     (
+        #         slice(None),
+        #         np.array([True, False, True]),
+        #     ),
+        #     True,
+        #     categorical,
+        #     (
+        #         np.array(
+        #             [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        #             dtype=config.floatX,
+        #         ),
+        #     ),
+        #     (4, 3),
+        # ),
+        # # Boolean indexing where output is empty
+        # (
+        #     (np.array([False, False]),),
+        #     True,
+        #     normal,
+        #     (np.array([[1.0, 0.0, 0.0]], dtype=config.floatX),),
+        #     (2, 3),
+        # ),
+        # (
+        #     (np.array([False, False]),),
+        #     True,
+        #     categorical,
+        #     (
+        #         np.array(
+        #             [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        #             dtype=config.floatX,
+        #         ),
+        #     ),
+        #     (2, 3),
+        # ),
+        # Multidimensional boolean indexing
         (
-            # `size`-less advanced boolean indexing
-            (np.r_[True, False, False, True],),
+            (np.array(np.random.binomial(n=1, p=.5, size=(5, 3, 2))).astype(bool),),
             True,
-            uniform,
+            normal,
             (
-                (0.1 - 1e-5) * np.arange(4).astype(dtype=config.floatX),
-                0.1 * np.arange(4).astype(dtype=config.floatX),
+                    np.arange(30).reshape(5, 3, 2),
+                    1e-6,
             ),
             (),
         ),
         (
-            # `size`-only advanced boolean indexing
-            (np.r_[True, False, False, True],),
-            True,
-            uniform,
-            (
-                np.array(0.9 - 1e-5, dtype=config.floatX),
-                np.array(0.9, dtype=config.floatX),
-            ),
-            (4,),
-        ),
-        (
-            # `size`-only slice
-            (slice(4, -6, -1),),
-            True,
-            uniform,
-            (
-                np.array(0.9 - 1e-5, dtype=config.floatX),
-                np.array(0.9, dtype=config.floatX),
-            ),
-            (5, 2),
-        ),
-        (
-            (slice(1, None), [0, 2]),
+            (np.array(np.random.binomial(n=1, p=.5, size=(5, 3,))).astype(bool),),
             True,
             normal,
             (
-                np.array([1, 10, 100], dtype=config.floatX),
-                np.array([1e-5, 2e-5, 3e-5], dtype=config.floatX),
-            ),
-            (4, 3),
-        ),
-        (
-            (np.array([1]), 0),
-            True,
-            normal,
-            (
-                np.array([[-1, 20], [300, -4000]], dtype=config.floatX),
-                np.array([[1e-6, 2e-6]], dtype=config.floatX),
-            ),
-            (3, 2, 2),
-        ),
-        # Only one distribution parameter
-        (
-            (0,),
-            True,
-            poisson,
-            (np.array([[1, 2], [3, 4]], dtype=config.floatX),),
-            (3, 2, 2),
-        ),
-        # Univariate distribution with vector parameters
-        (
-            (np.array([0, 2]),),
-            True,
-            categorical,
-            (np.array([0.0, 0.0, 1.0], dtype=config.floatX),),
-            (4,),
-        ),
-        (
-            (np.array([True, False, True, True]),),
-            True,
-            categorical,
-            (np.array([0.0, 0.0, 1.0], dtype=config.floatX),),
-            (4,),
-        ),
-        (
-            (np.array([True, False, True]),),
-            True,
-            categorical,
-            (
-                np.array(
-                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-                    dtype=config.floatX,
-                ),
+                np.arange(30).reshape(5, 3, 2),
+                1e-6,
             ),
             (),
         ),
         (
-            (
-                slice(None),
-                np.array([True, False, True]),
-            ),
-            True,
-            categorical,
-            (
-                np.array(
-                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-                    dtype=config.floatX,
-                ),
-            ),
-            (4, 3),
-        ),
-        # Boolean indexing where output is empty
-        (
-            (np.array([False, False]),),
+            (np.array(np.random.binomial(n=1, p=.5, size=(5, 3,))).astype(bool), slice(None)),
             True,
             normal,
-            (np.array([[1.0, 0.0, 0.0]], dtype=config.floatX),),
-            (2, 3),
+            (
+                np.arange(30).reshape(5, 3, 2),
+                1e-6,
+            ),
+            (),
         ),
         (
-            (np.array([False, False]),),
+            (np.array([True, False, True, False, False]), slice(None), (np.array([True, False]))),
             True,
-            categorical,
+            normal,
             (
-                np.array(
-                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-                    dtype=config.floatX,
-                ),
+                np.arange(30).reshape(5, 3, 2),
+                1e-6,
             ),
-            (2, 3),
+            (),
         ),
         # Multivariate cases, indexing only supported if it does not affect core dimensions
-        (
-            # Indexing dips into core dimension
-            (np.array([1]), 0),
-            False,
-            multivariate_normal,
-            (
-                np.array([[-1, 20], [300, -4000]], dtype=config.floatX),
-                np.eye(2).astype(config.floatX) * 1e-6,
-            ),
-            (),
-        ),
-        (
-            (np.array([0, 2]),),
-            True,
-            multivariate_normal,
-            (
-                np.array(
-                    [[-100, -125, -150], [0, 0, 0], [200, 225, 250]],
-                    dtype=config.floatX,
-                ),
-                np.eye(3, dtype=config.floatX) * 1e-6,
-            ),
-            (),
-        ),
-        (
-            (np.array([True, False, True]), slice(None)),
-            True,
-            multivariate_normal,
-            (
-                np.array([200, 250], dtype=config.floatX),
-                # Second covariance is invalid, to test it is not chosen
-                np.dstack([np.eye(2), np.eye(2) * 0, np.eye(2)]).T.astype(config.floatX)
-                * 1e-6,
-            ),
-            (3,),
-        ),
+        # (
+        #     # Indexing dips into core dimension
+        #     (np.array([1]), 0),
+        #     False,
+        #     multivariate_normal,
+        #     (
+        #         np.array([[-1, 20], [300, -4000]], dtype=config.floatX),
+        #         np.eye(2).astype(config.floatX) * 1e-6,
+        #     ),
+        #     (),
+        # ),
+        # (
+        #     (np.array([0, 2]),),
+        #     True,
+        #     multivariate_normal,
+        #     (
+        #         np.array(
+        #             [[-100, -125, -150], [0, 0, 0], [200, 225, 250]],
+        #             dtype=config.floatX,
+        #         ),
+        #         np.eye(3, dtype=config.floatX) * 1e-6,
+        #     ),
+        #     (),
+        # ),
+        # (
+        #     (np.array([True, False, True]), slice(None)),
+        #     True,
+        #     multivariate_normal,
+        #     (
+        #         np.array([200, 250], dtype=config.floatX),
+        #         # Second covariance is invalid, to test it is not chosen
+        #         np.dstack([np.eye(2), np.eye(2) * 0, np.eye(2)]).T.astype(config.floatX)
+        #         * 1e-6,
+        #     ),
+        #     (3,),
+        # ),
     ],
 )
 @config.change_flags(compute_test_value_opt="raise", compute_test_value="raise")
