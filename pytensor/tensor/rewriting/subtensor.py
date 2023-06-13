@@ -30,7 +30,7 @@ from pytensor.tensor.basic import (
 )
 from pytensor.tensor.elemwise import Elemwise
 from pytensor.tensor.exceptions import NotScalarConstantError
-from pytensor.tensor.math import Dot, add
+from pytensor.tensor.math import Dot, add, Sum
 from pytensor.tensor.math import all as at_all
 from pytensor.tensor.math import (
     and_,
@@ -1853,3 +1853,35 @@ def local_uint_constant_indices(fgraph, node):
     copy_stack_trace(node.outputs, new_outs)
 
     return new_outs
+
+
+@register_canonicalize
+@register_specialize
+@node_rewriter([Sum])
+def local_sum_set_subtensor_of_zeros(fgraph, node):
+    """Replace `sum(set_subtensor(zeros(n)[i], val)) -> val`. """
+
+    if node.outputs[0].type.ndim != 0:
+        return None
+
+    [set_subtensor] = node.inputs
+    if not (set_subtensor.owner and isinstance(set_subtensor.owner.op, IncSubtensor)):
+        return None
+
+    idx_list = set_subtensor.owner.op.idx_list
+    if len(idx_list) != 1:
+        return None
+
+    [idx] = idx_list
+    if idx not in aes.integer_types:
+        return None
+
+    # Check we are setting the value on zeros
+    [source, write, idx] = set_subtensor.owner.inputs
+    try:
+        is_zero = get_underlying_scalar_constant_value(source) == 0
+    except NotScalarConstantError:
+        return None
+
+    if is_zero:
+        return [write.astype(node.outputs[0].type.dtype)]
