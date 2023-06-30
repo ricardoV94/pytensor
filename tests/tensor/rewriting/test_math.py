@@ -1679,12 +1679,12 @@ def test_local_pow_specialize():
     utt.assert_allclose(f(val), val**twos)
 
 
-def test_local_pow_specialize_device_more_aggressive_on_cpu():
+def test_local_pow_to_nested_squaring():
     mode = config.mode
     if mode == "FAST_COMPILE":
         mode = "FAST_RUN"
     mode = get_mode(mode)
-    mode = mode.excluding("fusion").excluding("gpu")
+    mode = mode.excluding("fusion")
 
     v = vector()
     val = np.arange(10, dtype=config.floatX)
