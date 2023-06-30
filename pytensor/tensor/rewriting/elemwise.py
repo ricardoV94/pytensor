@@ -1254,6 +1254,49 @@ def local_careduce_fusion(fgraph, node):
     return [new_car_op(*elm_inputs)]
 
 
+@register_specialize
+@node_rewriter([Elemwise])
+def local_inline_composite_constants(fgraph, node):
+    """Inline scalar constants in Composite graphs."""
+    composite_op = node.op.scalar_op
+
+    if not isinstance(composite_op, aes.Composite):
+        return None
+
+    new_outer_inputs = []
+    new_inner_inputs = []
+    inner_replacements = {}
+    for outer_inp, inner_inp in zip(node.inputs, composite_op.fgraph.inputs):
+        # Complex variables don't have a `c_literal` that can be inlined
+        if "complex" not in outer_inp.type.dtype:
+            unique_value = get_unique_constant_value(outer_inp)
+            if unique_value is not None:
+                inner_replacements[inner_inp] = aes.constant(
+                    unique_value, dtype=inner_inp.dtype
+                )
+                continue
+        new_outer_inputs.append(outer_inp)
+        new_inner_inputs.append(inner_inp)
+
+    if not inner_replacements:
+        return None
+
+    new_inner_outs = clone_replace(
+        composite_op.fgraph.outputs, replace=inner_replacements
+    )
+    new_composite_op = aes.Composite(new_inner_inputs, new_inner_outs)
+    new_outputs = Elemwise(new_composite_op).make_node(*new_outer_inputs).outputs
+
+    # Some of the inlined constants were broadcasting the output shape
+    # This should be taken care of by `local_replace_broadcasted_constant`
+    for old_out, new_out in zip(node.outputs, new_outputs):
+        if old_out.type.broadcastable != new_out.type.broadcastable:
+            return None
+
+    copy_stack_trace(node.outputs, new_outputs)
+    return new_outputs
+
+
 # Register fusion database just before AddDestroyHandler(49.5) (inplace rewrites)
 fuse_seqopt = SequenceDB()
 compile.optdb.register(
@@ -1293,6 +1336,13 @@ fuse_seqopt.register(
     "fast_run",
     "fusion",
     position=10,
+)
+fuse_seqopt.register(
+    "local_inline_composite_constants",
+    in2out(local_inline_composite_constants),
+    "fast_run",
+    "fusion",
+    position=20,
 )
 
 
