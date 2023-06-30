@@ -12,7 +12,7 @@ from pytensor.compile.function import function
 from pytensor.compile.mode import Mode, get_default_mode
 from pytensor.configdefaults import config
 from pytensor.gradient import grad
-from pytensor.graph.basic import Constant, equal_computations
+from pytensor.graph.basic import Constant, ancestors, equal_computations
 from pytensor.graph.fg import FunctionGraph
 from pytensor.graph.rewriting.basic import check_stack_trace, out2in
 from pytensor.graph.rewriting.db import RewriteDatabaseQuery
@@ -1459,6 +1459,32 @@ def test_local_useless_composite_outputs():
     assert len(topo[0].inputs) == 1
     assert len(topo[0].outputs) == 1
     utt.assert_allclose(f([[np.nan]], [[1.0]], [[np.nan]]), [[0.0]])
+
+
+@pytest.mark.parametrize("const_shape", [(), (1,), (5,), (1, 5), (2, 5)])
+@pytest.mark.parametrize("op, np_op", [(at.pow, np.power), (at.add, np.add)])
+def test_local_inline_composite_constants(op, np_op, const_shape):
+    const = np.full(shape=const_shape, fill_value=2.5).astype(config.floatX)
+    x = vector("x")
+    y = vector("y")
+    out = at.exp(op(x, const)) + y
+
+    fn = pytensor.function(
+        [x, y], out, mode=get_default_mode().including("specialize", "fusion")
+    )
+    # There should be a single Composite after optimization
+    [node] = [
+        node for node in fn.maker.fgraph.apply_nodes if isinstance(node.op, Elemwise)
+    ]
+    assert isinstance(node.op.scalar_op, Composite)
+    assert len(node.inputs) == 2  # x and y, but not const
+
+    x_test_value = np.arange(5).astype(config.floatX)
+    y_test_value = np.ones(5).astype(config.floatX)
+    np.testing.assert_allclose(
+        fn(x_test_value, y_test_value),
+        np.exp(np_op(x_test_value, const)) + y_test_value,
+    )
 
 
 def test_local_useless_dimshuffle_makevector():
