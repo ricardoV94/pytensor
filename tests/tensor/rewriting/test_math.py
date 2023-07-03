@@ -96,7 +96,7 @@ from pytensor.tensor.rewriting.math import (
     perform_sigm_times_exp,
     simplify_mul,
 )
-from pytensor.tensor.shape import Reshape, Shape_i
+from pytensor.tensor.shape import Reshape, Shape_i, SpecifyShape
 from pytensor.tensor.type import (
     TensorType,
     cmatrix,
@@ -1670,6 +1670,13 @@ def test_local_pow_specialize():
     assert nodes[0] == sqrt
     assert isinstance(nodes[1].scalar_op, aes.basic.Reciprocal)
     utt.assert_allclose(f(val_no0), val_no0 ** (-0.5))
+
+    twos = np.full(shape=(10,), fill_value=2.0)
+    f = function([v], v**twos)
+    ops = [node.op for node in f.maker.fgraph.toposort()]
+    assert isinstance(ops[0], SpecifyShape)
+    assert ops[1] == sqr
+    utt.assert_allclose(f(val), val**twos)
 
 
 def test_local_pow_specialize_device_more_aggressive_on_cpu():
