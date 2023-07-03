@@ -12,7 +12,7 @@ from pytensor.compile.function import function
 from pytensor.compile.mode import Mode, get_default_mode
 from pytensor.configdefaults import config
 from pytensor.gradient import grad
-from pytensor.graph.basic import Constant, ancestors, equal_computations
+from pytensor.graph.basic import Constant, equal_computations
 from pytensor.graph.fg import FunctionGraph
 from pytensor.graph.rewriting.basic import check_stack_trace, out2in
 from pytensor.graph.rewriting.db import RewriteDatabaseQuery
@@ -176,6 +176,21 @@ class TestDimshuffleLift:
         # Make sure rewrite doesn't apply in this case
         g = FunctionGraph([x], outs)
         assert not local_dimshuffle_lift.transform(g, g.outputs[0].owner)
+
+
+def test_local_replace_broadcasted_constants():
+    const = np.full(shape=(2, 5), fill_value=2.6)
+    x = scalar("x")
+    out = at.power(x, const)
+    new_out = rewrite_graph(
+        out, include=["ShapeOpt", "local_replace_broadcasted_constants"]
+    )
+    ref_out = at.alloc(
+        at.power(x, [[2.6]]),
+        at.constant(2, dtype="int64"),
+        at.constant(5, dtype="int64"),
+    )
+    assert equal_computations([new_out], [ref_out])
 
 
 def test_local_useless_dimshuffle_in_reshape():

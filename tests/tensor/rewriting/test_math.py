@@ -987,7 +987,7 @@ class TestAlgebraicCanonizer:
         new_out = rewrite_graph(
             out, custom_rewrite=in2out(local_mul_canonizer, name="test")
         )
-        expected_out = [2.0] * specify_shape(x, (5,))
+        expected_out = np.array([2.0], dtype=config.floatX) * specify_shape(x, (5,))
         assert equal_computations([new_out], [expected_out])
 
     def test_broadcasted_by_constant(self):
