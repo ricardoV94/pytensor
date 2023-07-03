@@ -4,6 +4,8 @@ from functools import lru_cache
 from typing import DefaultDict, Generator, List, Set, Tuple, TypeVar
 from warnings import warn
 
+import numpy as np
+
 import pytensor
 import pytensor.scalar.basic as aes
 from pytensor import clone_replace, compile
@@ -28,14 +30,19 @@ from pytensor.tensor.basic import (
     MakeVector,
     alloc,
     cast,
+    constant,
     get_underlying_scalar_constant_value,
 )
 from pytensor.tensor.elemwise import CAReduce, DimShuffle, Elemwise
 from pytensor.tensor.exceptions import NotScalarConstantError
 from pytensor.tensor.math import exp
-from pytensor.tensor.rewriting.basic import register_canonicalize, register_specialize
+from pytensor.tensor.rewriting.basic import (
+    broadcast_like,
+    register_canonicalize,
+    register_specialize,
+)
 from pytensor.tensor.shape import shape_padleft
-from pytensor.tensor.var import TensorConstant
+from pytensor.tensor.var import TensorConstant, get_unique_constant_value
 
 
 class InplaceElemwiseOptimizer(GraphRewriter):
@@ -550,6 +557,50 @@ def local_upcast_elemwise_constant_inputs(fgraph, node):
                 # Copy over output stacktrace from before upcasting
                 copy_stack_trace(node.outputs[0], rval)
                 return rval
+
+
+@register_specialize
+@node_rewriter([Elemwise])
+def local_replace_broadcasted_constant(fgraph, node):
+    """Remove broadcasted constants from Elemwise graphs
+
+    Elemwise(scalar, ones((3, 4))) -> Alloc(Elemwise(scalar, ones((1, 1))), 3, 4)
+
+    This will avoid a useless iterations over constant arrays
+    """
+    if len(node.inputs) == 1:
+        return None
+
+    new_elem_inps = []
+    ndims = node.outputs[0].type.ndim
+    found_const = False
+    for inp in node.inputs:
+        # If input has non-broadcastable dims
+        if not all(b for b in inp.type.broadcastable):
+            constant_value = get_unique_constant_value(inp)
+            if constant_value is not None:
+                constant_value = np.expand_dims(
+                    constant_value, axis=tuple(range(ndims))
+                ).astype(inp.type.dtype)
+                new_elem_inps.append(constant(constant_value))
+                found_const = True
+                continue
+
+        new_elem_inps.append(inp)
+
+    if not found_const:
+        return None
+
+    new_outs = node.op.make_node(*new_elem_inps).outputs
+    # The constants were needed to enforce the output shape
+    if node.outputs[0].type.broadcastable != new_outs[0].type.broadcastable:
+        new_outs = [
+            broadcast_like(new_out, template=node.outputs[0], fgraph=fgraph)
+            for new_out in new_outs
+        ]
+
+    copy_stack_trace(node.outputs, new_outs)
+    return new_outs
 
 
 @node_rewriter([Elemwise])

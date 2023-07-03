@@ -178,6 +178,19 @@ class TestDimshuffleLift:
         assert not local_dimshuffle_lift.transform(g, g.outputs[0].owner)
 
 
+def test_local_replace_broadcasted_constant():
+    const = np.full(shape=(2, 5), fill_value=2.6)
+    x = scalar("x")
+    out = at.power(x, const)
+    new_out = rewrite_graph(out, include=["ShapeOpt", "specialize"])
+    ref_out = at.alloc(
+        at.power(x, [[2.6]]),
+        at.constant(2, dtype="int64"),
+        at.constant(5, dtype="int64"),
+    )
+    assert equal_computations([new_out], [ref_out])
+
+
 def test_local_useless_dimshuffle_in_reshape():
     vec = TensorType(dtype="float64", shape=(None,))("vector")
     mat = TensorType(dtype="float64", shape=(None, None))("mat")
