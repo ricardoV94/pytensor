@@ -780,3 +780,9 @@ def test_random_concrete_shape_graph_input():
     out = at.random.normal(0, 1, size=size_at, rng=rng)
     jax_fn = random_function([size_at], out, mode=jax_mode)
     assert jax_fn(10).shape == (10,)
+
+
+def test_halfnormal_scalar_constant():
+    out = at.random.halfnormal(0, 1)
+    jax_fn = random_function([], out, mode=jax_mode)
+    assert jax_fn().shape == ()
