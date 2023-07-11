@@ -31,7 +31,7 @@ from pytensor.tensor.basic import (
     alloc,
     cast,
     constant,
-    get_underlying_scalar_constant_value,
+    get_underlying_scalar_constant_value, fill,
 )
 from pytensor.tensor.elemwise import CAReduce, DimShuffle, Elemwise
 from pytensor.tensor.exceptions import NotScalarConstantError
@@ -41,6 +41,7 @@ from pytensor.tensor.rewriting.basic import (
     register_canonicalize,
     register_specialize,
 )
+from pytensor.tensor.rewriting.math import broadcast_with
 from pytensor.tensor.shape import shape_padleft
 from pytensor.tensor.var import TensorConstant, get_unique_constant_value
 
@@ -1302,26 +1303,36 @@ fuse_seqopt.register(
 )
 
 
+@register_canonicalize
+@register_specialize
 @node_rewriter([Elemwise])
 def local_replace_broadcasted_constants(fgraph, node):
     """Remove broadcasted constants from Elemwise graphs
 
     Elemwise(matrix, ones((3, 4))) -> Elemwise(vector, ones((1, 1)))
 
+    This avoids useless repeated iterations over constant arrays.
+
     In cases where the constant influenced the final shape of the Elemwise operation
     We broadcast (via alloc) the new Elemwise result:
 
     Elemwise(row, ones((3, 4))) -> Alloc(Elemwise(row, ones((1, 1))), 3, 4)
 
-    This will avoid useless iterations over constant arrays.
+    This incurs an additional extra Alloc and Copy.
+    Probably, it can be slower for simple Elemwise and faster for complex ones.
+    It can also facilitate the fusion of Elemwise of the same lower rank.
     """
+
+    if node.op == fill:
+        return None
+
     if len(node.inputs) == 1:
         return None
 
-    new_elem_inps = []
+    broadcasted_constants = []
+    new_elem_inps = node.inputs.copy()
     ndims = node.outputs[0].type.ndim
-    found_const = False
-    for inp in node.inputs:
+    for idx, inp in enumerate(node.inputs):
         # If input has non-broadcastable dims
         if not all(b for b in inp.type.broadcastable):
             constant_value = get_unique_constant_value(inp)
@@ -1329,36 +1340,20 @@ def local_replace_broadcasted_constants(fgraph, node):
                 constant_value = np.expand_dims(
                     constant_value, axis=tuple(range(ndims))
                 ).astype(inp.type.dtype)
-                new_elem_inps.append(constant(constant_value))
-                found_const = True
-                continue
+                new_elem_inps[idx] = constant(constant_value)
+                broadcasted_constants.append(inp)
 
-        new_elem_inps.append(inp)
-
-    if not found_const:
+    if not broadcasted_constants:
         return None
 
     new_outs = node.op.make_node(*new_elem_inps).outputs
 
     # The constants were needed to enforce the output shape
     if node.outputs[0].type.broadcastable != new_outs[0].type.broadcastable:
-        new_outs = [
-            broadcast_like(new_out, template=node.outputs[0], fgraph=fgraph)
-            for new_out in new_outs
-        ]
+        new_outs = [broadcast_with(new_out, broadcasted_constants)[0] for new_out in new_outs]
 
     copy_stack_trace(node.outputs, new_outs)
     return new_outs
-
-
-# We register this immediately after the fusion database.
-# We don't want Allocs to break up the fusion rewrites
-compile.optdb.register(
-    "local_replace_broadcasted_constants",
-    in2out(local_replace_broadcasted_constants),
-    "fast_run",
-    position=49.01,
-)
 
 
 def _rebuild_partial_2f1grad_loop(node, wrt):

@@ -182,9 +182,7 @@ def test_local_replace_broadcasted_constants():
     const = np.full(shape=(2, 5), fill_value=2.6)
     x = scalar("x")
     out = at.power(x, const)
-    new_out = rewrite_graph(
-        out, include=["ShapeOpt", "local_replace_broadcasted_constants"]
-    )
+    new_out = rewrite_graph(out, include=["canonicalize", "specialize"])
     ref_out = at.alloc(
         at.power(x, [[2.6]]),
         at.constant(2, dtype="int64"),

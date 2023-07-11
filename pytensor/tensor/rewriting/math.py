@@ -4,6 +4,7 @@ import itertools
 import operator
 from collections import defaultdict
 from functools import partial, reduce
+from typing import List
 
 import numpy as np
 
@@ -101,7 +102,7 @@ from pytensor.tensor.type import (
     values_eq_approx_remove_inf_nan,
     values_eq_approx_remove_nan,
 )
-from pytensor.tensor.var import TensorConstant, get_unique_constant_value
+from pytensor.tensor.var import TensorConstant, get_unique_constant_value, TensorVariable
 
 
 def scalarconsts_rest(inputs, elemwise=True, only_process_constants=False):
@@ -148,7 +149,13 @@ def get_constant(v):
         return v
 
 
-def fill_chain(new_out, orig_inputs):
+def broadcast_with(new_out, orig_inputs) -> List[TensorVariable]:
+    """Broadcast new_out with orig_inputs via nested Elemwise Seconds.
+
+    Equivalent to the following numpy command:
+
+    `np.broadcast_to(new_out, np.broadcast_shapes(new_out, *orig_inputs))`
+    """
     for i in orig_inputs:
         new_out = fill(i, new_out)
     return [new_out]
@@ -1136,7 +1143,7 @@ class AlgebraicCanonizer(NodeRewriter):
             new = cast(new, out.type.dtype)
 
         if new.type.broadcastable != out.type.broadcastable:
-            new = fill_chain(new, node.inputs)[0]
+            new = broadcast_with(new, node.inputs)[0]
 
         if (new.type.dtype == out.type.dtype) and (
             new.type.broadcastable == out.type.broadcastable
@@ -1961,7 +1968,7 @@ def local_mul_zero(fgraph, node):
             # print 'MUL by value', value, node.inputs
             if value == 0:
                 # print '... returning zeros'
-                return fill_chain(_asarray(0, dtype=otype.dtype), node.inputs)
+                return broadcast_with(_asarray(0, dtype=otype.dtype), node.inputs)
 
 
 # TODO: Add this to the canonicalization to reduce redundancy.
@@ -2261,12 +2268,12 @@ def local_add_specialize(fgraph, node):
         # Reuse call to constant for cache()
         cst = constant(np.zeros((1,) * ndim, dtype=dtype))
         assert cst.type.broadcastable == (True,) * ndim
-        return fill_chain(cst, node.inputs)
+        return broadcast_with(cst, node.inputs)
 
     if len(new_inputs) == 1:
-        ret = fill_chain(new_inputs[0], node.inputs)
+        ret = broadcast_with(new_inputs[0], node.inputs)
     else:
-        ret = fill_chain(add(*new_inputs), node.inputs)
+        ret = broadcast_with(add(*new_inputs), node.inputs)
 
     # The dtype should not be changed. It can happen if the input
     # that was forcing upcasting was equal to 0.
@@ -2384,7 +2391,7 @@ def local_log1p(fgraph, node):
                         ninp = nonconsts[0]
                     if ninp.dtype != log_arg.type.dtype:
                         ninp = ninp.astype(node.outputs[0].dtype)
-                    return fill_chain(log1p(ninp), scalar_inputs)
+                    return broadcast_with(log1p(ninp), scalar_inputs)
 
         elif log_arg.owner and log_arg.owner.op == sub:
             one = extract_constant(log_arg.owner.inputs[0], only_process_constants=True)
@@ -3579,7 +3586,7 @@ def local_reciprocal_1_plus_exp(fgraph, node):
             if len(nonconsts) == 1:
                 if nonconsts[0].owner and nonconsts[0].owner.op == exp:
                     if scalars_ and np.allclose(np.sum(scalars_), 1):
-                        out = fill_chain(
+                        out = broadcast_with(
                             sigmoid(neg(nonconsts[0].owner.inputs[0])),
                             scalar_inputs,
                         )
