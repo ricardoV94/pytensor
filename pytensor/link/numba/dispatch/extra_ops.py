@@ -10,7 +10,6 @@ from pytensor.link.numba.dispatch.basic import get_numba_type, numba_funcify
 from pytensor.raise_op import CheckAndRaise
 from pytensor.tensor.extra_ops import (
     Bartlett,
-    BroadcastTo,
     CumOp,
     FillDiagonal,
     FillDiagonalOffset,
@@ -351,29 +350,6 @@ def numba_funcify_Searchsorted(op, node, **kwargs):
             return np.searchsorted(a, v, side)
 
     return searchsorted
-
-
-@numba_funcify.register(BroadcastTo)
-def numba_funcify_BroadcastTo(op, node, **kwargs):
-    create_zeros_tuple = numba_basic.create_tuple_creator(
-        lambda _: 0, len(node.inputs) - 1
-    )
-
-    # TODO broadcastable checks
-    @numba_basic.numba_njit
-    def broadcast_to(x, *shape):
-        scalars_shape = create_zeros_tuple()
-
-        i = 0
-        for s_i in literal_unroll(shape):
-            scalars_shape = numba_basic.tuple_setitem(
-                scalars_shape, i, numba_basic.to_scalar(s_i)
-            )
-            i += 1
-
-        return np.broadcast_to(x, scalars_shape)
-
-    return broadcast_to
 
 
 @numba_funcify.register(CheckAndRaise)
