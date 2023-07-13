@@ -1427,17 +1427,33 @@ class Alloc(COp):
     __props__ = ()
 
     def make_node(self, value, *shape):
-        v = as_tensor_variable(value)
-        sh, static_shape = infer_static_shape(shape)
-        if v.ndim > len(sh):
+        value = as_tensor_variable(value)
+        shape, static_shape = infer_static_shape(shape)
+        if value.ndim > len(shape):
             raise TypeError(
                 "The Alloc value to use has more dimensions"
                 " than the specified dimensions",
-                v.ndim,
-                len(sh),
+                value.ndim,
+                len(shape),
             )
-        otype = TensorType(dtype=v.dtype, shape=static_shape)
-        return Apply(self, [v] + sh, [otype()])
+
+        # Combine static shape information from value and shape
+        combined_static_shape = list(static_shape).copy()
+        new_dims = len(shape) - value.type.ndim
+        extended_value_static_shape = (None,) * new_dims + (value.type.shape)
+        for i, (v_st, sh_st) in enumerate(
+            zip(extended_value_static_shape, static_shape)
+        ):
+            if (v_st not in (1, None)) and (sh_st is None):
+                combined_static_shape[i] = v_st
+            elif (v_st is not None) and (sh_st is not None):
+                if v_st != sh_st and v_st != 1:
+                    raise ValueError(
+                        f"Alloc static input shape and target shape are incompatible: {value.type.shape} vs {static_shape}"
+                    )
+
+        otype = TensorType(dtype=value.dtype, shape=combined_static_shape)
+        return Apply(self, [value] + shape, [otype()])
 
     def perform(self, node, inputs, out_):
         (out,) = out_
