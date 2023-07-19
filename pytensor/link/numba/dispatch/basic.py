@@ -36,6 +36,7 @@ from pytensor.scalar.math import Softplus
 from pytensor.sparse import SparseTensorType
 from pytensor.tensor.blas import BatchedDot
 from pytensor.tensor.math import Dot
+from pytensor.tensor.random.type import RandomGeneratorType
 from pytensor.tensor.shape import Reshape, Shape, Shape_i, SpecifyShape
 from pytensor.tensor.slinalg import Cholesky, Solve
 from pytensor.tensor.subtensor import (
@@ -116,6 +117,8 @@ def get_numba_type(
             return CSCMatrixType(numba_dtype)
 
         raise NotImplementedError()
+    elif isinstance(pytensor_type, RandomGeneratorType):
+        return numba.types.npy_rng
     else:
         raise NotImplementedError(f"Numba type not implemented for {pytensor_type}")
 
