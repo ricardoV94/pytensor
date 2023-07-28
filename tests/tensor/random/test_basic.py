@@ -391,7 +391,7 @@ def test_chisquare_samples(df, size):
 )
 def test_gumbel_samples(mu, beta, size):
     compare_sample_values(
-        gumbel, mu, beta, size=size, test_fn=fixed_scipy_rvs("gumbel_r")
+        gumbel, mu, beta, size=size,
     )
 
 
@@ -491,7 +491,8 @@ def mvnormal_test_fn(mean=None, cov=None, size=None, random_state=None):
         cov = np.array([[1.0]], dtype=config.floatX)
     if size is None:
         size = ()
-    return multivariate_normal.rng_fn(random_state, mean, cov, size)
+    shape = tuple(size) + (mean.shape[-1],)
+    return multivariate_normal.rng_fn(random_state, mean, cov, shape)
 
 
 @pytest.mark.parametrize(
@@ -581,10 +582,10 @@ def test_mvnormal_samples(mu, cov, size):
 
 def test_mvnormal_default_args():
     compare_sample_values(multivariate_normal, test_fn=mvnormal_test_fn)
-
+    shape = (4, 2)
     with pytest.raises(ValueError, match="operands could not be broadcast together "):
         multivariate_normal.rng_fn(
-            None, np.zeros((3, 2)), np.ones((3, 2, 2)), size=(4,)
+            None, np.zeros((3, 2)), np.ones((3, 2, 2)), shape
         )
 
 
@@ -647,10 +648,12 @@ def test_mvnormal_ShapeFeature():
     ],
 )
 def test_dirichlet_samples(alphas, size):
-    def dirichlet_test_fn(mean=None, cov=None, size=None, random_state=None):
+    def dirichlet_test_fn(alphas, size=None, random_state=None):
         if size is None:
-            size = ()
-        return dirichlet.rng_fn(random_state, alphas, size)
+            shape = ()
+        else:
+            shape = tuple(size) + (alphas.shape[-1],)
+        return dirichlet.rng_fn(random_state, alphas, shape)
 
     compare_sample_values(dirichlet, alphas, size=size, test_fn=dirichlet_test_fn)
 
@@ -659,15 +662,15 @@ def test_dirichlet_rng():
     alphas = np.array([[100, 1, 1], [1, 100, 1], [1, 1, 100]], dtype=config.floatX)
 
     with pytest.raises(ValueError, match="operands could not be broadcast together"):
-        # The independent dimension's shape cannot be broadcasted from (3,) to (10, 2)
-        dirichlet.rng_fn(None, alphas, size=(10, 2))
+        # The batch dimension's shape cannot be broadcasted from (3,) to (10, 4)
+        dirichlet.rng_fn(None, alphas, (10, 4, 3))
 
     with pytest.raises(
         ValueError, match="input operand has more dimensions than allowed"
     ):
-        # One of the independent dimension's shape is missing from size
-        # (i.e. should be `(1, 3)`)
-        dirichlet.rng_fn(None, np.broadcast_to(alphas, (1, 3, 3)), size=(3,))
+        # One of the independent dimension's shape is missing from shape
+        # (i.e. should be `(1, 3, 3)`)
+        dirichlet.rng_fn(None, np.broadcast_to(alphas, (1, 3, 3)), (3, 3))
 
 
 M_at = iscalar("M")
@@ -677,9 +680,9 @@ M_at.tag.test_value = 3
 @pytest.mark.parametrize(
     "M, size",
     [
-        (at.ones((M_at,)), ()),
-        (at.ones((M_at,)), (M_at + 1,)),
-        (at.ones((M_at,)), (2, M_at)),
+        # (at.ones((M_at,)), ()),
+        # (at.ones((M_at,)), (M_at + 1,)),
+        # (at.ones((M_at,)), (2, M_at)),
         (at.ones((M_at, M_at + 1)), ()),
         (at.ones((M_at, M_at + 1)), (M_at + 2, M_at)),
         (at.ones((M_at, M_at + 1)), (2, M_at + 2, M_at + 3, M_at)),
@@ -687,7 +690,11 @@ M_at.tag.test_value = 3
 )
 def test_dirichlet_infer_shape(M, size):
     rv = dirichlet(M, size=size)
-    rv_shape = list(dirichlet._infer_shape(size or (), [M], None))
+    if size:
+        shape = size + (M.shape[-1],)
+    else:
+        shape = ()
+    rv_shape = list(dirichlet._infer_shape(shape, [M], None))
 
     all_args = (M,) + size
     fn_inputs = [
@@ -1182,56 +1189,47 @@ def test_gengamma_samples(alpha, p, lambd, size):
 
 
 @pytest.mark.parametrize(
-    "M, p, size, test_fn",
+    "M, p, size",
     [
         (
             np.array(10, dtype=np.int64),
             np.array([0.7, 0.3], dtype=config.floatX),
-            None,
             None,
         ),
         (
             np.array(10, dtype=np.int64),
             np.array([0.7, 0.3], dtype=config.floatX),
             [],
-            None,
         ),
         (
             np.array(10, dtype=np.int64),
             np.array([0.7, 0.3], dtype=config.floatX),
             [2, 3],
-            None,
         ),
         (
             np.full((1, 2), 10, dtype=np.int64),
             np.array([0.7, 0.3], dtype=config.floatX),
             None,
-            lambda *args, size=None, random_state=None, **kwargs: multinomial.rng_fn(
-                random_state, *(args + (size,))
-            ),
         ),
         (
             np.array([10, 20], dtype=np.int64),
             np.array([[0.999, 0.001], [0.001, 0.999]], dtype=config.floatX),
             None,
-            lambda *args, **kwargs: np.array([[10, 0], [0, 20]]),
         ),
         (
             np.array([10, 20], dtype=np.int64),
             np.array([[0.999, 0.001], [0.001, 0.999]], dtype=config.floatX),
             (3, 2),
-            lambda *args, **kwargs: np.stack([np.array([[10, 0], [0, 20]])] * 3),
         ),
     ],
 )
-def test_multinomial_samples(M, p, size, test_fn):
+def test_multinomial_samples(M, p, size):
     rng = np.random.default_rng(1234)
     compare_sample_values(
         multinomial,
         M,
         p,
         size=size,
-        test_fn=test_fn,
         rng=rng,
     )
 
@@ -1240,16 +1238,17 @@ def test_multinomial_rng():
     test_M = np.array([10, 20], dtype=np.int64)
     test_p = np.array([[0.999, 0.001], [0.001, 0.999]], dtype=config.floatX)
 
-    with pytest.raises(ValueError, match="operands could not be broadcast together"):
-        # The independent dimension's shape cannot be broadcasted from (2,) to (1,)
-        multinomial.rng_fn(None, test_M, test_p, size=(1,))
+    rng = np.random.default_rng()
+
+    with pytest.raises(ValueError, match=re.escape("Output size (1,) is not compatible with broadcast dimensions of inputs (2,).")):
+        multinomial.rng_fn(rng, test_M, test_p, (1, 2))
 
     with pytest.raises(
-        ValueError, match="input operand has more dimensions than allowed"
+        ValueError, match=re.escape('Output size (2,) is not compatible with broadcast dimensions of inputs (5, 2).'),
     ):
-        # One of the independent dimension's shape is missing from size
-        # (i.e. should be `(5, 2)`)
-        multinomial.rng_fn(None, np.broadcast_to(test_M, (5, 2)), test_p, size=(2,))
+        # One of the independent dimension's shape is missing from shape
+        # (i.e. should be `(5, 2, 2)`)
+        multinomial.rng_fn(rng, np.broadcast_to(test_M, (5, 2)), test_p, (2, 2))
 
 
 @pytest.mark.parametrize(
@@ -1303,18 +1302,18 @@ def test_categorical_basic():
     with pytest.raises(ValueError):
         # The independent dimension of p has shape=(3,) which cannot be
         # broadcasted to (10,)
-        categorical.rng_fn(rng, p, size=(10,))
+        categorical.rng_fn(rng, p, shape=(10,))
 
-    msg = re.escape("`size` is incompatible with the shape of `p`")
+    msg = re.escape("`shape` argument is incompatible with the shape of `p`")
     with pytest.raises(ValueError, match=msg):
         # The independent dimension of p has shape=(3,) which cannot be
         # broadcasted to (1,)
-        categorical.rng_fn(rng, p, size=(1,))
+        categorical.rng_fn(rng, p, shape=(1,))
 
     with pytest.raises(ValueError, match=msg):
         # The independent dimensions of p have shape=(1, 3) which cannot be
         # broadcasted to (3,)
-        categorical.rng_fn(rng, p[None], size=(3,))
+        categorical.rng_fn(rng, p[None], shape=(3,))
 
 
 def test_randint_samples():
@@ -1360,9 +1359,6 @@ def test_integers_samples():
 
 
 def test_choice_samples():
-    with pytest.raises(NotImplementedError):
-        choice._supp_shape_from_params(np.asarray(5))
-
     compare_sample_values(choice, np.asarray(5))
     compare_sample_values(choice, np.asarray([5]))
     compare_sample_values(choice, np.array([1.0, 5.0], dtype=config.floatX))

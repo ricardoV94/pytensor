@@ -17,7 +17,7 @@ from pytensor.tensor.basic import (
     infer_static_shape,
 )
 from pytensor.tensor.random.type import RandomGeneratorType, RandomStateType, RandomType
-from pytensor.tensor.random.utils import normalize_size_param, params_broadcast_shapes
+from pytensor.tensor.random.utils import normalize_shape_param, params_broadcast_shapes
 from pytensor.tensor.shape import shape_tuple
 from pytensor.tensor.type import TensorType, all_dtypes
 from pytensor.tensor.type_other import NoneConst
@@ -113,13 +113,25 @@ class RandomVariable(Op):
         values (not shapes) of some parameters. For instance, a `gaussian_random_walk(steps, size=(2,))`,
         might have `support_shape=(steps,)`.
         """
+        if self.ndim_supp == 0:
+            return ()
+
         raise NotImplementedError(
-            "`_supp_shape_from_params` must be implemented for multivariate RVs"
+            "`_supp_shape_from_params` must be implemented for multivariate RVs when shape is not provided"
         )
 
     def rng_fn(self, rng, *args, **kwargs) -> Union[int, float, np.ndarray]:
         """Sample a numeric random variate."""
-        return getattr(rng, self.name)(*args, **kwargs)
+        # Convert shape to size
+        *params, shape = args
+        if shape is None:
+            size = None
+        else:
+            if self.ndim_supp == 0:
+                size = shape
+            else:
+                size = shape[:-self.ndim_supp]
+        return getattr(rng, self.name)(*params, size=size, **kwargs)
 
     def __str__(self):
         props_str = ", ".join(f"{getattr(self, prop)}" for prop in self.__props__[1:])
@@ -127,7 +139,7 @@ class RandomVariable(Op):
 
     def _infer_shape(
         self,
-        size: TensorVariable,
+        shape: TensorVariable,
         dist_params: Sequence[TensorVariable],
         param_shapes: Optional[Sequence[Tuple[Variable, ...]]] = None,
     ) -> Union[TensorVariable, Tuple[ScalarVariable, ...]]:
@@ -135,8 +147,8 @@ class RandomVariable(Op):
 
         Parameters
         ----------
-        size
-            The size parameter specified for this `RandomVariable`.
+        shape
+            The shape parameter specified for this `RandomVariable`.
         dist_params
             The symbolic parameter for this `RandomVariable`'s distribution.
         param_shapes
@@ -149,7 +161,7 @@ class RandomVariable(Op):
 
         from pytensor.tensor.extra_ops import broadcast_shape_iter
 
-        size_len = get_vector_length(size)
+        size_len = get_vector_length(shape) - self.ndim_supp
 
         if size_len > 0:
             # Fail early when size is incompatible with parameters
@@ -159,18 +171,12 @@ class RandomVariable(Op):
                 param_batched_dims = getattr(param, "ndim", 0) - param_ndim_supp
                 if param_batched_dims > size_len:
                     raise ValueError(
-                        f"Size length is incompatible with batched dimensions of parameter {i} {param}:\n"
-                        f"len(size) = {size_len}, len(batched dims {param}) = {param_batched_dims}. "
-                        f"Size length must be 0 or >= {param_batched_dims}"
+                        f"Shape length is incompatible with batched dimensions of parameter {i} {param}:\n"
+                        f"len(batched dims {param}) = {param_batched_dims}. "
+                        f"Shape length must be empty or >= {param_batched_dims + self.ndim_supp}"
                     )
 
-            if self.ndim_supp == 0:
-                return size
-            else:
-                supp_shape = self._supp_shape_from_params(
-                    dist_params, param_shapes=param_shapes
-                )
-                return tuple(size) + tuple(supp_shape)
+            return shape
 
         # Broadcast the parameters
         param_shapes = params_broadcast_shapes(
@@ -226,29 +232,38 @@ class RandomVariable(Op):
         return shape
 
     def infer_shape(self, fgraph, node, input_shapes):
-        _, size, _, *dist_params = node.inputs
-        _, size_shape, _, *param_shapes = input_shapes
+        _, shape, _, *dist_params = node.inputs
+        _, shape_shape, _, *param_shapes = input_shapes
 
         try:
-            size_len = get_vector_length(size)
+            shape_len = get_vector_length(shape)
         except ValueError:
-            size_len = get_underlying_scalar_constant_value(size_shape[0])
+            shape_len = get_underlying_scalar_constant_value(shape_shape[0])
 
-        size = tuple(size[n] for n in range(size_len))
+        shape = tuple(shape[n] for n in range(shape_len))
 
-        shape = self._infer_shape(size, dist_params, param_shapes=param_shapes)
+        shape = self._infer_shape(shape, dist_params, param_shapes=param_shapes)
 
         return [None, list(shape)]
 
-    def __call__(self, *args, size=None, name=None, rng=None, dtype=None, **kwargs):
-        res = super().__call__(rng, size, dtype, *args, **kwargs)
+    def __call__(self, *args, shape=None, name=None, rng=None, dtype=None, **kwargs):
+        # For compatibility with Numpy
+        if "size" in kwargs:
+            if shape is not None:
+                raise ValueError("Cannot specify both shape and size")
+            size = tuple(normalize_shape_param(kwargs.pop("size")))
+            if size:
+                args = [as_tensor_variable(arg) if not isinstance(arg, Variable) else arg for arg in args]
+                shape = tuple(normalize_shape_param(size)) + self._supp_shape_from_params(args)
+
+        res = super().__call__(rng, shape, dtype, *args, **kwargs)
 
         if name is not None:
             res.name = name
 
         return res
 
-    def make_node(self, rng, size, dtype, *dist_params):
+    def make_node(self, rng, shape, dtype, *dist_params):
         """Create a random variable node.
 
         Parameters
@@ -256,8 +271,8 @@ class RandomVariable(Op):
         rng: RandomGeneratorType or RandomStateType
             Existing PyTensor `Generator` or `RandomState` object to be used.  Creates a
             new one, if `None`.
-        size: int or Sequence
-            NumPy-like size parameter.
+        shape: int or Sequence
+            Shape of the output.
         dtype: str
             The dtype of the sampled output.  If the value ``"floatX"`` is
             given, then `dtype` is set to ``pytensor.config.floatX``.  This value is
@@ -268,11 +283,11 @@ class RandomVariable(Op):
         Results
         -------
         out: Apply
-            A node with inputs ``(rng, size, dtype) + dist_args`` and outputs
+            A node with inputs ``(rng, shape, dtype) + dist_args`` and outputs
             ``(rng_var, out_var)``.
 
         """
-        size = normalize_size_param(size)
+        shape = normalize_shape_param(shape)
 
         dist_params = tuple(
             as_tensor_variable(p) if not isinstance(p, Variable) else p
@@ -286,8 +301,9 @@ class RandomVariable(Op):
                 "The type of rng should be an instance of either RandomGeneratorType or RandomStateType"
             )
 
-        shape = self._infer_shape(size, dist_params)
-        _, static_shape = infer_static_shape(shape)
+        output_shape = self._infer_shape(shape, dist_params)
+        _, static_shape = infer_static_shape(output_shape)
+        # FIXME: This silently ignores the `dtype` to `make_node` when `op.dtype` is given
         dtype = self.dtype or dtype
 
         if dtype == "floatX":
@@ -303,7 +319,7 @@ class RandomVariable(Op):
 
         outtype = TensorType(dtype=dtype, shape=static_shape)
         out_var = outtype()
-        inputs = (rng, size, dtype_idx) + dist_params
+        inputs = (rng, shape, dtype_idx) + dist_params
         outputs = (rng.type(), out_var)
 
         return Apply(self, inputs, outputs)
@@ -311,17 +327,17 @@ class RandomVariable(Op):
     def perform(self, node, inputs, outputs):
         rng_var_out, smpl_out = outputs
 
-        rng, size, dtype, *args = inputs
+        rng, shape, dtype, *args = inputs
 
         out_var = node.outputs[1]
 
-        # If `size == []`, that means no size is enforced, and NumPy is trusted
+        # If `shape == []`, that means no shape is enforced, and NumPy is trusted
         # to draw the appropriate number of samples, NumPy uses `size=None` to
         # represent that.  Otherwise, NumPy expects a tuple.
-        if np.size(size) == 0:
-            size = None
+        if np.size(shape) == 0:
+            shape = None
         else:
-            size = tuple(size)
+            shape = tuple(shape)
 
         # Draw from `rng` if `self.inplace` is `True`, and from a copy of `rng`
         # otherwise.
@@ -330,13 +346,17 @@ class RandomVariable(Op):
 
         rng_var_out[0] = rng
 
-        smpl_val = self.rng_fn(rng, *(args + [size]))
+        smpl_val = self.rng_fn(rng, *(args + [shape]))
 
         if (
             not isinstance(smpl_val, np.ndarray)
             or str(smpl_val.dtype) != out_var.type.dtype
         ):
             smpl_val = _asarray(smpl_val, dtype=out_var.type.dtype)
+
+        # Just a check for Numpy routines that use size and ignore support shape
+        if shape is not None and smpl_val.shape != shape:
+            raise ValueError(f"Shape of draws {smpl_val.shape} don't match the specified shape {shape}.")
 
         smpl_out[0] = smpl_val
 

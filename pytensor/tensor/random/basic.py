@@ -54,7 +54,7 @@ class ScipyRandomVariable(RandomVariable):
 
     @classmethod
     def rng_fn(cls, *args, **kwargs):
-        size = args[-1]
+        shape = args[-1]
         res = cls.rng_fn_scipy(*args, **kwargs)
 
         if np.ndim(res) == 0:
@@ -62,7 +62,7 @@ class ScipyRandomVariable(RandomVariable):
             # type, so we need to clone/create a usable NumPy result
             res = np.asarray(res)
 
-        if size is None:
+        if shape is None:
             # SciPy will sometimes drop broadcastable dimensions; we need to
             # check and, if necessary, add them back
             exp_shape = broadcast_shapes(*[np.shape(a) for a in args[1:-1]])
@@ -92,7 +92,7 @@ class UniformRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("Uniform", "\\operatorname{Uniform}")
 
-    def __call__(self, low=0.0, high=1.0, size=None, **kwargs):
+    def __call__(self, low=0.0, high=1.0, shape=None, **kwargs):
         r"""Draw samples from a uniform distribution.
 
         The results are undefined when `high < low`.
@@ -110,14 +110,12 @@ class UniformRV(RandomVariable):
         high
            Upper boundary :math:`h` of the output interval; all values generated
            will be less than or equal to `high`.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(low, high, size=size, **kwargs)
+        return super().__call__(low, high, shape=shape, **kwargs)
 
 
 uniform = UniformRV()
@@ -146,7 +144,7 @@ class TriangularRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("Triangular", "\\operatorname{Triangular}")
 
-    def __call__(self, left, mode, right, size=None, **kwargs):
+    def __call__(self, left, mode, right, shape=None, **kwargs):
         r"""Draw samples from a triangular distribution.
 
         Signature
@@ -165,14 +163,12 @@ class TriangularRV(RandomVariable):
         right
            Upper boundary :math:`r` of the output interval; all values generated
            will be less than or equal to `right`. Must be larger than `left`.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(left, mode, right, size=size, **kwargs)
+        return super().__call__(left, mode, right, shape=shape, **kwargs)
 
 
 triangular = TriangularRV()
@@ -201,7 +197,7 @@ class BetaRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("Beta", "\\operatorname{Beta}")
 
-    def __call__(self, alpha, beta, size=None, **kwargs):
+    def __call__(self, alpha, beta, shape=None, **kwargs):
         r"""Draw samples from a beta distribution.
 
         Signature
@@ -215,14 +211,12 @@ class BetaRV(RandomVariable):
             Alpha parameter :math:`\alpha` of the distribution. Must be positive.
         beta
             Beta parameter :math:`\beta` of the distribution. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(alpha, beta, size=size, **kwargs)
+        return super().__call__(alpha, beta, shape=shape, **kwargs)
 
 
 beta = BetaRV()
@@ -247,7 +241,7 @@ class NormalRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("Normal", "\\operatorname{Normal}")
 
-    def __call__(self, loc=0.0, scale=1.0, size=None, **kwargs):
+    def __call__(self, loc=0.0, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from a normal distribution.
 
         Signature
@@ -261,14 +255,12 @@ class NormalRV(RandomVariable):
             Mean :math:`\mu` of the normal distribution.
         scale
             Standard deviation :math:`\sigma` of the normal distribution. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(loc, scale, size=size, **kwargs)
+        return super().__call__(loc, scale, shape=shape, **kwargs)
 
 
 normal = NormalRV()
@@ -285,7 +277,7 @@ class StandardNormalRV(NormalRV):
 
     """
 
-    def __call__(self, size=None, **kwargs):
+    def __call__(self, shape=None, **kwargs):
         """Draw samples from a standard normal distribution.
 
         Signature
@@ -295,14 +287,12 @@ class StandardNormalRV(NormalRV):
 
         Parameters
         ----------
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(loc=0.0, scale=1.0, size=size, **kwargs)
+        return super().__call__(loc=0.0, scale=1.0, shape=shape, **kwargs)
 
 
 standard_normal = StandardNormalRV()
@@ -327,7 +317,7 @@ class HalfNormalRV(ScipyRandomVariable):
     dtype = "floatX"
     _print_name = ("HalfNormal", "\\operatorname{HalfNormal}")
 
-    def __call__(self, loc=0.0, scale=1.0, size=None, **kwargs):
+    def __call__(self, loc=0.0, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from a half-normal distribution.
 
         Signature
@@ -341,17 +331,15 @@ class HalfNormalRV(ScipyRandomVariable):
             Location parameter :math:`\mu` of the distribution.
         scale
             Scale parameter :math:`\sigma` of the distribution.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(loc, scale, size=size, **kwargs)
+        return super().__call__(loc, scale, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, loc, scale, size):
+    def rng_fn_scipy(cls, rng, loc, scale, shape):
         r"""Draw sample from a half-normal distribution using Scipy's generator.
 
         Parameters
@@ -360,14 +348,12 @@ class HalfNormalRV(ScipyRandomVariable):
             Location parameter :math:`\mu` of the distribution.
         scale
             Scale parameter :math:`\sigma` of the distribution.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return stats.halfnorm.rvs(loc, scale, random_state=rng, size=size)
+        return stats.halfnorm.rvs(loc, scale, random_state=rng, size=shape)
 
 
 halfnormal = HalfNormalRV()
@@ -392,7 +378,7 @@ class LogNormalRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("LogNormal", "\\operatorname{LogNormal}")
 
-    def __call__(self, mean=0.0, sigma=1.0, size=None, **kwargs):
+    def __call__(self, mean=0.0, sigma=1.0, shape=None, **kwargs):
         r"""Draw sample from a lognormal distribution.
 
         Signature
@@ -406,20 +392,18 @@ class LogNormalRV(RandomVariable):
             Mean :math:`\mu` of the random variable's natural logarithm.
         sigma
             Standard deviation :math:`\sigma` of the random variable's natural logarithm.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(mean, sigma, size=size, **kwargs)
+        return super().__call__(mean, sigma, shape=shape, **kwargs)
 
 
 lognormal = LogNormalRV()
 
 
-class GammaRV(ScipyRandomVariable):
+class GammaRV(RandomVariable):
     r"""A gamma continuous random variable.
 
     The probability density function for `gamma` in terms of the shape parameter
@@ -443,7 +427,7 @@ class GammaRV(ScipyRandomVariable):
     dtype = "floatX"
     _print_name = ("Gamma", "\\operatorname{Gamma}")
 
-    def __call__(self, shape, rate, size=None, **kwargs):
+    def __call__(self, shape_param, rate, shape=None, **kwargs):
         r"""Draw samples from a gamma distribution.
 
         Signature
@@ -453,22 +437,16 @@ class GammaRV(ScipyRandomVariable):
 
         Parameters
         ----------
-        shape
+        shape_param
             The shape :math:`\alpha` of the gamma distribution. Must be positive.
         rate
             The rate :math:`\beta` of the gamma distribution. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(shape, 1.0 / rate, size=size, **kwargs)
-
-    @classmethod
-    def rng_fn_scipy(cls, rng, shape, scale, size):
-        return stats.gamma.rvs(shape, scale=scale, size=size, random_state=rng)
+        return super().__call__(shape_param, 1.0 / rate, shape=shape, **kwargs)
 
 
 gamma = GammaRV()
@@ -501,7 +479,7 @@ class ChiSquareRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("ChiSquare", "\\operatorname{ChiSquare}")
 
-    def __call__(self, df, size=None, **kwargs):
+    def __call__(self, df, shape=None, **kwargs):
         r"""Draw samples from a chisquare distribution.
 
         Signature
@@ -513,14 +491,12 @@ class ChiSquareRV(RandomVariable):
         ----------
         df
             The number :math:`k` of degrees of freedom. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(df, size=size, **kwargs)
+        return super().__call__(df, shape=shape, **kwargs)
 
 
 chisquare = ChiSquareRV()
@@ -545,7 +521,7 @@ class ParetoRV(ScipyRandomVariable):
     dtype = "floatX"
     _print_name = ("Pareto", "\\operatorname{Pareto}")
 
-    def __call__(self, b, scale=1.0, size=None, **kwargs):
+    def __call__(self, b, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from a pareto distribution.
 
         Signature
@@ -559,24 +535,22 @@ class ParetoRV(ScipyRandomVariable):
             The shape :math:`b` (or exponent) of the pareto distribution. Must be positive.
         scale
             The scale :math:`x_m` of the pareto distribution. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(b, scale, size=size, **kwargs)
+        return super().__call__(b, scale, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, b, scale, size):
-        return stats.pareto.rvs(b, scale=scale, size=size, random_state=rng)
+    def rng_fn_scipy(cls, rng, b, scale, shape):
+        return stats.pareto.rvs(b, scale=scale, size=shape, random_state=rng)
 
 
 pareto = ParetoRV()
 
 
-class GumbelRV(ScipyRandomVariable):
+class GumbelRV(RandomVariable):
     r"""A gumbel continuous random variable.
 
     The probability density function for `gumbel` in terms of its location parameter :math:`\mu` and
@@ -599,7 +573,7 @@ class GumbelRV(ScipyRandomVariable):
         self,
         loc: Union[np.ndarray, float],
         scale: Union[np.ndarray, float] = 1.0,
-        size: Optional[Union[List[int], int]] = None,
+        shape: Optional[Union[List[int], int]] = None,
         **kwargs,
     ) -> RandomVariable:
         r"""Draw samples from a gumbel distribution.
@@ -615,24 +589,13 @@ class GumbelRV(ScipyRandomVariable):
             The location parameter :math:`\mu` of the distribution.
         scale
             The scale :math:`\beta` of the distribution. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(loc, scale, size=size, **kwargs)
+        return super().__call__(loc, scale, shape=shape, **kwargs)
 
-    @classmethod
-    def rng_fn_scipy(
-        cls,
-        rng: Union[np.random.Generator, np.random.RandomState],
-        loc: Union[np.ndarray, float],
-        scale: Union[np.ndarray, float],
-        size: Optional[Union[List[int], int]],
-    ) -> np.ndarray:
-        return stats.gumbel_r.rvs(loc=loc, scale=scale, size=size, random_state=rng)
 
 
 gumbel = GumbelRV()
@@ -656,7 +619,7 @@ class ExponentialRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("Exponential", "\\operatorname{Exponential}")
 
-    def __call__(self, scale=1.0, size=None, **kwargs):
+    def __call__(self, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from an exponential distribution.
 
         Signature
@@ -668,14 +631,12 @@ class ExponentialRV(RandomVariable):
         ----------
         scale
             The scale :math:`\beta` of the distribution. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(scale, size=size, **kwargs)
+        return super().__call__(scale, shape=shape, **kwargs)
 
 
 exponential = ExponentialRV()
@@ -699,7 +660,7 @@ class WeibullRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("Weibull", "\\operatorname{Weibull}")
 
-    def __call__(self, shape, size=None, **kwargs):
+    def __call__(self, shape_param, shape=None, **kwargs):
         r"""Draw samples from a weibull distribution.
 
         Signature
@@ -709,16 +670,14 @@ class WeibullRV(RandomVariable):
 
         Parameters
         ----------
-        shape
+        shape_param
             The shape :math:`k` of the distribution. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(shape, size=size, **kwargs)
+        return super().__call__(shape_param, shape=shape, **kwargs)
 
 
 weibull = WeibullRV()
@@ -743,7 +702,7 @@ class LogisticRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("Logistic", "\\operatorname{Logistic}")
 
-    def __call__(self, loc=0, scale=1, size=None, **kwargs):
+    def __call__(self, loc=0, scale=1, shape=None, **kwargs):
         r"""Draw samples from a logistic distribution.
 
         Signature
@@ -758,14 +717,12 @@ class LogisticRV(RandomVariable):
             The location parameter :math:`\mu` of the distribution.
         scale
             The scale :math:`s` of the distribution. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(loc, scale, size=size, **kwargs)
+        return super().__call__(loc, scale, shape=shape, **kwargs)
 
 
 logistic = LogisticRV()
@@ -791,7 +748,7 @@ class VonMisesRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("VonMises", "\\operatorname{VonMises}")
 
-    def __call__(self, mu, kappa, size=None, **kwargs):
+    def __call__(self, mu, kappa, shape=None, **kwargs):
         r"""Draw samples from a von Mises distribution.
 
         Signature
@@ -805,14 +762,12 @@ class VonMisesRV(RandomVariable):
             The mode :math:`\mu` of the distribution.
         kappa
             The dispersion parameter :math:`\kappa` of the distribution. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(mu, kappa, size=size, **kwargs)
+        return super().__call__(mu, kappa, shape=shape, **kwargs)
 
 
 vonmises = VonMisesRV()
@@ -866,7 +821,7 @@ class MvNormalRV(RandomVariable):
             ref_param_idx=0,
         )
 
-    def __call__(self, mean=None, cov=None, size=None, **kwargs):
+    def __call__(self, mean=None, cov=None, shape=None, **kwargs):
         r""" "Draw samples from a multivariate normal distribution.
 
         Signature
@@ -882,11 +837,9 @@ class MvNormalRV(RandomVariable):
         cov
             Covariance matrix :math:`\Sigma` of the distribution. Must be a symmetric
             and positive-semidefinite `NxN` matrix.
-        size
-            Given a size of, for example, `(m, n, k)`, `m * n * k` independent,
-            identically distributed samples are generated. Because each sample
-            is `N`-dimensional, the output shape is `(m, n, k, N)`. If no shape
-            is specified, a single `N`-dimensional sample is returned.
+        shape
+            Given a shape of, for example, `(m, n, k, N)`, `m * n * k` independent,
+            identically distributed samples are generated.
 
         """
         dtype = pytensor.config.floatX if self.dtype == "floatX" else self.dtype
@@ -895,16 +848,20 @@ class MvNormalRV(RandomVariable):
             mean = np.array([0.0], dtype=dtype)
         if cov is None:
             cov = np.array([[1.0]], dtype=dtype)
-        return super().__call__(mean, cov, size=size, **kwargs)
+        return super().__call__(mean, cov, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn(cls, rng, mean, cov, size):
+    def rng_fn(cls, rng, mean, cov, shape):
+        if shape is not None:
+            size = shape[:-1]
+        else:
+            size = ()
+
         if mean.ndim > 1 or cov.ndim > 2:
             # Neither SciPy nor NumPy implement parameter broadcasting for
             # multivariate normals (or any other multivariate distributions),
             # so we need to implement that here
 
-            size = tuple(size or ())
             if size:
                 mean = np.broadcast_to(mean, size + mean.shape[-1:])
                 cov = np.broadcast_to(cov, size + cov.shape[-2:])
@@ -952,7 +909,7 @@ class DirichletRV(RandomVariable):
             ref_param_idx=0,
         )
 
-    def __call__(self, alphas, size=None, **kwargs):
+    def __call__(self, alphas, shape=None, **kwargs):
         r"""Draw samples from a dirichlet distribution.
 
         Signature
@@ -965,23 +922,21 @@ class DirichletRV(RandomVariable):
         alphas
             A sequence of concentration parameters :math:`\boldsymbol{\alpha}` of the
             distribution. A sequence of length `k` will produce samples of length `k`.
-        size
-            Given a size of, for example, `(r, s, t)`, `r * s * t` independent,
-            identically distributed samples are generated. Because each sample
-            is `k`-dimensional, the output shape is `(r, s, t, k)`. If no shape
-            is specified, a single `k`-dimensional sample is returned.
+        shape
+            Given a shape of, for example, `(r, s, t, k)`, `r * s * t` independent,
+            distributed samples are generated.
 
         """
-        return super().__call__(alphas, size=size, **kwargs)
+        return super().__call__(alphas, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn(cls, rng, alphas, size):
+    def rng_fn(cls, rng, alphas, shape):
+        if shape is not None:
+            size = tuple(shape[:-1])
+        else:
+            size = ()
+
         if alphas.ndim > 1:
-            if size is None:
-                size = ()
-
-            size = tuple(np.atleast_1d(size))
-
             if size:
                 alphas = np.broadcast_to(alphas, size + alphas.shape[-1:])
 
@@ -1017,7 +972,7 @@ class PoissonRV(RandomVariable):
     dtype = "int64"
     _print_name = ("Poisson", "\\operatorname{Poisson}")
 
-    def __call__(self, lam=1.0, size=None, **kwargs):
+    def __call__(self, lam=1.0, shape=None, **kwargs):
         r"""Draw samples from a poisson distribution.
 
         Signature
@@ -1029,14 +984,12 @@ class PoissonRV(RandomVariable):
         ----------
         lam
             Expected number of events :math:`\lambda`. Must be positive.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-            independent, identically distributed random variables are
-            returned. Default is `None` in which case a single random variable
-            is returned.
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+            independents samples are returned.
 
         """
-        return super().__call__(lam, size=size, **kwargs)
+        return super().__call__(lam, shape=shape, **kwargs)
 
 
 poisson = PoissonRV()
@@ -1062,7 +1015,7 @@ class GeometricRV(RandomVariable):
     dtype = "int64"
     _print_name = ("Geometric", "\\operatorname{Geometric}")
 
-    def __call__(self, p, size=None, **kwargs):
+    def __call__(self, p, shape=None, **kwargs):
         r"""Draw samples from a geometric distribution.
 
         Signature
@@ -1074,13 +1027,11 @@ class GeometricRV(RandomVariable):
         ----------
         p
             Probability of success :math:`p` of an individual trial.
-        size
-            Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n *
-            k` independent, identically distributed samples are returned.
-            Default is `None` in which case a single sample is returned.
-
+        shape
+            Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n *
+            k` independent samples are returned.
         """
-        return super().__call__(p, size=size, **kwargs)
+        return super().__call__(p, shape=shape, **kwargs)
 
 
 geometric = GeometricRV()
@@ -1104,7 +1055,7 @@ class HyperGeometricRV(RandomVariable):
     dtype = "int64"
     _print_name = ("HyperGeometric", "\\operatorname{HyperGeometric}")
 
-    def __call__(self, ngood, nbad, nsample, size=None, **kwargs):
+    def __call__(self, ngood, nbad, nsample, shape=None, **kwargs):
         r"""Draw samples from a geometric distribution.
 
         Signature
@@ -1121,13 +1072,12 @@ class HyperGeometricRV(RandomVariable):
         nsample
             Number :math:`n` of items sampled. Must be less than :math:`N`,
             i.e. `ngood + nbad`.` Positive integer.
-        size
-           Sample shape. If the given size is, e.g. `(m, n, k)` then `m * n * k`
-           independent, identically distributed samples are returned. Default is
-           `None` in which case a single sample is returned.
+        shape
+           Sample shape. If the given shape is, e.g. `(m, n, k)` then `m * n * k`
+           independent samples are returned.
 
         """
-        return super().__call__(ngood, nbad, nsample, size=size, **kwargs)
+        return super().__call__(ngood, nbad, nsample, shape=shape, **kwargs)
 
 
 hypergeometric = HyperGeometricRV()
@@ -1152,7 +1102,7 @@ class CauchyRV(ScipyRandomVariable):
     dtype = "floatX"
     _print_name = ("Cauchy", "\\operatorname{Cauchy}")
 
-    def __call__(self, loc=0.0, scale=1.0, size=None, **kwargs):
+    def __call__(self, loc=0.0, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from a Cauchy distribution.
 
         Signature
@@ -1167,17 +1117,16 @@ class CauchyRV(ScipyRandomVariable):
         scale
             Scale parameter :math:`\gamma` of the distribution. Must be
             positive.
-        size
-           Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-           independent, identically distributed samples are returned. Default is
-           `None` in which case a single sample is returned.
+        shape
+           Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+           independent samples are returned.
 
         """
-        return super().__call__(loc, scale, size=size, **kwargs)
+        return super().__call__(loc, scale, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, loc, scale, size):
-        return stats.cauchy.rvs(loc=loc, scale=scale, random_state=rng, size=size)
+    def rng_fn_scipy(cls, rng, loc, scale, shape):
+        return stats.cauchy.rvs(loc=loc, scale=scale, random_state=rng, size=shape)
 
 
 cauchy = CauchyRV()
@@ -1202,7 +1151,7 @@ class HalfCauchyRV(ScipyRandomVariable):
     dtype = "floatX"
     _print_name = ("HalfCauchy", "\\operatorname{HalfCauchy}")
 
-    def __call__(self, loc=0.0, scale=1.0, size=None, **kwargs):
+    def __call__(self, loc=0.0, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from a half-Cauchy distribution.
 
         Signature
@@ -1217,17 +1166,16 @@ class HalfCauchyRV(ScipyRandomVariable):
         scale
             Scale parameter :math:`\gamma` of the distribution. Must be
             positive.
-        size
-           Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-           independent, identically distributed samples are returned. Default is
-           `None`, in which case a single sample is returned.
+        shape
+           Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+           independent samples are returned.
 
         """
-        return super().__call__(loc, scale, size=size, **kwargs)
+        return super().__call__(loc, scale, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, loc, scale, size):
-        return stats.halfcauchy.rvs(loc=loc, scale=scale, random_state=rng, size=size)
+    def rng_fn_scipy(cls, rng, loc, scale, shape):
+        return stats.halfcauchy.rvs(loc=loc, scale=scale, random_state=rng, size=shape)
 
 
 halfcauchy = HalfCauchyRV()
@@ -1256,7 +1204,7 @@ class InvGammaRV(ScipyRandomVariable):
     dtype = "floatX"
     _print_name = ("InverseGamma", "\\operatorname{InverseGamma}")
 
-    def __call__(self, shape, scale, size=None, **kwargs):
+    def __call__(self, shape_param, scale, shape=None, **kwargs):
         r"""Draw samples from an inverse-gamma distribution.
 
         Signature
@@ -1271,17 +1219,16 @@ class InvGammaRV(ScipyRandomVariable):
         scale
             Scale parameter :math:`\beta` of the distribution. Must be
             positive.
-        size
-           Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-           independent, identically distributed sample are returned. Default is
-           `None`, in which case a single sample is returned.
+        shape
+           Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+           independent samples are returned.
 
         """
-        return super().__call__(shape, scale, size=size, **kwargs)
+        return super().__call__(shape_param, scale, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, shape, scale, size):
-        return stats.invgamma.rvs(shape, scale=scale, size=size, random_state=rng)
+    def rng_fn_scipy(cls, rng, shape_param, scale, shape):
+        return stats.invgamma.rvs(shape_param, scale=scale, size=shape, random_state=rng)
 
 
 invgamma = InvGammaRV()
@@ -1306,7 +1253,7 @@ class WaldRV(RandomVariable):
     dtype = "floatX"
     _print_name_ = ("Wald", "\\operatorname{Wald}")
 
-    def __call__(self, mean=1.0, scale=1.0, size=None, **kwargs):
+    def __call__(self, mean=1.0, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from a Wald distribution.
 
         Signature
@@ -1321,13 +1268,12 @@ class WaldRV(RandomVariable):
         shape
             Shape parameter :math:`\lambda` of the distribution. Must be
             positive.
-        size
-           Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-           independent, identically distributed samples are returned. Default is
-           `None`, in which case a single sample is returned.
+        shape
+           Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+           independent samples are returned.
 
         """
-        return super().__call__(mean, scale, size=size, **kwargs)
+        return super().__call__(mean, scale, shape=shape, **kwargs)
 
 
 wald = WaldRV()
@@ -1353,7 +1299,7 @@ class TruncExponentialRV(ScipyRandomVariable):
     dtype = "floatX"
     _print_name = ("TruncatedExponential", "\\operatorname{TruncatedExponential}")
 
-    def __call__(self, b, loc=0.0, scale=1.0, size=None, **kwargs):
+    def __call__(self, b, loc=0.0, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from a truncated exponential distribution.
 
         Signature
@@ -1370,18 +1316,17 @@ class TruncExponentialRV(ScipyRandomVariable):
         scale
             Scale parameter :math:`\beta` of the distribution. Must be
             positive.
-        size
-           Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-           independent, identically distributed samples are returned. Default is
-           `None` in which case a single sample is returned.
+        shape
+           Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+           independent samples are returned.
 
         """
-        return super().__call__(b, loc, scale, size=size, **kwargs)
+        return super().__call__(b, loc, scale, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, b, loc, scale, size):
+    def rng_fn_scipy(cls, rng, b, loc, scale, shape):
         return stats.truncexpon.rvs(
-            b, loc=loc, scale=scale, size=size, random_state=rng
+            b, loc=loc, scale=scale, size=shape, random_state=rng
         )
 
 
@@ -1408,7 +1353,7 @@ class StudentTRV(ScipyRandomVariable):
     dtype = "floatX"
     _print_name = ("StudentT", "\\operatorname{StudentT}")
 
-    def __call__(self, df, loc=0.0, scale=1.0, size=None, **kwargs):
+    def __call__(self, df, loc=0.0, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from a Student's t distribution.
 
         Signature
@@ -1426,17 +1371,16 @@ class StudentTRV(ScipyRandomVariable):
         scale
             Scale parameter :math:`\sigma` of the distribution. Must be
             positive.
-        size
-           Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-           independent, identically distributed samples are returned. Default is
-           `None` in which case a single sample is returned.
+        shape
+           Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+           independent samples are returned.
 
         """
-        return super().__call__(df, loc, scale, size=size, **kwargs)
+        return super().__call__(df, loc, scale, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, df, loc, scale, size):
-        return stats.t.rvs(df, loc=loc, scale=scale, size=size, random_state=rng)
+    def rng_fn_scipy(cls, rng, df, loc, scale, shape):
+        return stats.t.rvs(df, loc=loc, scale=scale, size=shape, random_state=rng)
 
 
 t = StudentTRV()
@@ -1467,7 +1411,7 @@ class BernoulliRV(ScipyRandomVariable):
     dtype = "int64"
     _print_name = ("Bernoulli", "\\operatorname{Bernoulli}")
 
-    def __call__(self, p, size=None, **kwargs):
+    def __call__(self, p, shape=None, **kwargs):
         r"""Draw samples from a Bernoulli distribution.
 
         Signature
@@ -1479,17 +1423,16 @@ class BernoulliRV(ScipyRandomVariable):
         ----------
         p
             Probability of success :math:`p` of a single trial.
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-            independent, identically distributed samples are returned. Default
-            is `None` in which case a single sample is returned.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+            independent, identically distributed samples are returned.
 
         """
-        return super().__call__(p, size=size, **kwargs)
+        return super().__call__(p, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, p, size):
-        return stats.bernoulli.rvs(p, size=size, random_state=rng)
+    def rng_fn_scipy(cls, rng, p, shape):
+        return stats.bernoulli.rvs(p, size=shape, random_state=rng)
 
 
 bernoulli = BernoulliRV()
@@ -1514,7 +1457,7 @@ class LaplaceRV(RandomVariable):
     dtype = "floatX"
     _print_name = ("Laplace", "\\operatorname{Laplace}")
 
-    def __call__(self, loc=0.0, scale=1.0, size=None, **kwargs):
+    def __call__(self, loc=0.0, scale=1.0, shape=None, **kwargs):
         r"""Draw samples from a Laplace distribution.
 
         Signature
@@ -1530,13 +1473,12 @@ class LaplaceRV(RandomVariable):
         scale
             Scale parameter :math:`\lambda` of the distribution. Must be
             positive.
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-            independent, identically distributed samples are returned. Default
-            is `None` in which case a single sample is returned.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+            independent samples are returned.
 
         """
-        return super().__call__(loc, scale, size=size, **kwargs)
+        return super().__call__(loc, scale, shape=shape, **kwargs)
 
 
 laplace = LaplaceRV()
@@ -1560,7 +1502,7 @@ class BinomialRV(RandomVariable):
     dtype = "int64"
     _print_name = ("Binomial", "\\operatorname{Binomial}")
 
-    def __call__(self, n, p, size=None, **kwargs):
+    def __call__(self, n, p, shape=None, **kwargs):
         r"""Draw samples from a binomial distribution.
 
         Signature
@@ -1574,19 +1516,18 @@ class BinomialRV(RandomVariable):
             Number of trials :math:`n`. Must be a positive integer.
         p
             Probability of success :math:`p` of a single trial.
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-            independent, identically distributed samples are returned. Default
-            is `None` in which case a single sample is returned.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+            independent samples are returned.
 
         """
-        return super().__call__(n, p, size=size, **kwargs)
+        return super().__call__(n, p, shape=shape, **kwargs)
 
 
 binomial = BinomialRV()
 
 
-class NegBinomialRV(ScipyRandomVariable):
+class NegBinomialRV(RandomVariable):
     r"""A negative binomial discrete random variable.
 
     The probability mass function for `nbinom` for the number :math:`k` of draws
@@ -1598,13 +1539,13 @@ class NegBinomialRV(ScipyRandomVariable):
             f(k; p, n) = {k+n-1 \choose n-1} p^n (1-p)^{k}
 
     """
-    name = "nbinom"
+    name = "negative_binomial"
     ndim_supp = 0
     ndims_params = [0, 0]
     dtype = "int64"
     _print_name = ("NegativeBinomial", "\\operatorname{NegativeBinomial}")
 
-    def __call__(self, n, p, size=None, **kwargs):
+    def __call__(self, n, p, shape=None, **kwargs):
         r"""Draw samples from a negative binomial distribution.
 
         Signature
@@ -1618,17 +1559,12 @@ class NegBinomialRV(ScipyRandomVariable):
             Number of successes :math:`n`. Must be a positive integer.
         p
             Probability of success :math:`p` of a single trial.
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-            independent, identically distributed samples are returned. Default
-            is `None` in which case a single sample is returned.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+            independent samples are returned.
 
         """
-        return super().__call__(n, p, size=size, **kwargs)
-
-    @classmethod
-    def rng_fn_scipy(cls, rng, n, p, size):
-        return stats.nbinom.rvs(n, p, size=size, random_state=rng)
+        return super().__call__(n, p, shape=shape, **kwargs)
 
 
 nbinom = NegBinomialRV()
@@ -1659,7 +1595,7 @@ class BetaBinomialRV(ScipyRandomVariable):
     dtype = "int64"
     _print_name = ("BetaBinomial", "\\operatorname{BetaBinomial}")
 
-    def __call__(self, n, a, b, size=None, **kwargs):
+    def __call__(self, n, a, b, shape=None, **kwargs):
         r"""Draw samples from a beta-binomial distribution.
 
         Signature
@@ -1675,17 +1611,16 @@ class BetaBinomialRV(ScipyRandomVariable):
             Shape parameter :math:`a`. Must be positive.
         b
             Shape parameter :math:`b`. Must be positive.
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-            independent, identically distributed samples are returned. Default
-            is `None` in which case a single sample is returned.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+            independent samples are returned.
 
         """
-        return super().__call__(n, a, b, size=size, **kwargs)
+        return super().__call__(n, a, b, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, n, a, b, size):
-        return stats.betabinom.rvs(n, a, b, size=size, random_state=rng)
+    def rng_fn_scipy(cls, rng, n, a, b, shape):
+        return stats.betabinom.rvs(n, a, b, size=shape, random_state=rng)
 
 
 betabinom = BetaBinomialRV()
@@ -1710,7 +1645,7 @@ class GenGammaRV(ScipyRandomVariable):
     dtype = "floatX"
     _print_name = ("GeneralizedGamma", "\\operatorname{GeneralizedGamma}")
 
-    def __call__(self, alpha=1.0, p=1.0, lambd=1.0, size=None, **kwargs):
+    def __call__(self, alpha=1.0, p=1.0, lambd=1.0, shape=None, **kwargs):
         r"""Draw samples from a generalized gamma distribution.
 
         Signature
@@ -1726,19 +1661,17 @@ class GenGammaRV(ScipyRandomVariable):
             Parameter :math:`p`. Must be positive.
         lambd
             Scale parameter :math:`\lambda`. Must be positive.
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-            independent, identically distributed samples are
-            returned. Default is `None` in which case a single sample
-            is returned.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+            independent samples are returned.
 
         """
-        return super().__call__(alpha, p, lambd, size=size, **kwargs)
+        return super().__call__(alpha, p, lambd, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn_scipy(cls, rng, alpha, p, lambd, size):
+    def rng_fn_scipy(cls, rng, alpha, p, lambd, shape):
         return stats.gengamma.rvs(
-            alpha / p, p, scale=lambd, size=size, random_state=rng
+            alpha / p, p, scale=lambd, size=shape, random_state=rng
         )
 
 
@@ -1772,7 +1705,7 @@ class MultinomialRV(RandomVariable):
     dtype = "int64"
     _print_name = ("Multinomial", "\\operatorname{Multinomial}")
 
-    def __call__(self, n, p, size=None, **kwargs):
+    def __call__(self, n, p, shape=None, **kwargs):
         r"""Draw samples from a discrete multinomial distribution.
 
         Signature
@@ -1786,14 +1719,12 @@ class MultinomialRV(RandomVariable):
             Number of experiments :math:`n`. Must be a positive integer.
         p
             Probabilities of each of the :math:`k` different outcomes.
-        size
-            Given a size of, for example, `(r, s, t)`, `r * s * t` independent,
-            identically distributed samples are generated. Because each sample
-            is `k`-dimensional, the output shape is `(r, s, t, k)`. If no shape
-            is specified, a single `k`-dimensional sample is returned.
+        shape
+            Given a shape of, for example, `(r, s, t, k)`, `r * s * t` independent,
+            identically distributed samples are generated.
 
         """
-        return super().__call__(n, p, size=size, **kwargs)
+        return super().__call__(n, p, shape=shape, **kwargs)
 
     def _supp_shape_from_params(self, dist_params, param_shapes=None):
         return supp_shape_from_ref_param_shape(
@@ -1802,24 +1733,6 @@ class MultinomialRV(RandomVariable):
             param_shapes=param_shapes,
             ref_param_idx=1,
         )
-
-    @classmethod
-    def rng_fn(cls, rng, n, p, size):
-        if n.ndim > 0 or p.ndim > 1:
-            size = tuple(size or ())
-
-            if size:
-                n = np.broadcast_to(n, size)
-                p = np.broadcast_to(p, size + p.shape[-1:])
-            else:
-                n, p = broadcast_params([n, p], cls.ndims_params)
-
-            res = np.empty(p.shape, dtype=cls.dtype)
-            for idx in np.ndindex(p.shape[:-1]):
-                res[idx] = rng.multinomial(n[idx], p[idx])
-            return res
-        else:
-            return rng.multinomial(n, p, size=size)
 
 
 multinomial = MultinomialRV()
@@ -1847,7 +1760,7 @@ class CategoricalRV(RandomVariable):
     dtype = "int64"
     _print_name = ("Categorical", "\\operatorname{Categorical}")
 
-    def __call__(self, p, size=None, **kwargs):
+    def __call__(self, p, shape=None, **kwargs):
         r"""Draw samples from a discrete categorical distribution.
 
         Signature
@@ -1859,29 +1772,26 @@ class CategoricalRV(RandomVariable):
         ----------
         p
             An array that contains the :math:`N` event probabilities.
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-            independent, identically distributed random samples are
-            returned. Default is `None`, in which case a single sample
-            is returned.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+            independent samples are returned.
 
         """
-        return super().__call__(p, size=size, **kwargs)
+        return super().__call__(p, shape=shape, **kwargs)
 
     @classmethod
-    def rng_fn(cls, rng, p, size):
-        if size is None:
-            size = p.shape[:-1]
+    def rng_fn(cls, rng, p, shape):
+        if shape is None:
+            shape = p.shape[:-1]
         else:
-            # Check that `size` does not define a shape that would be broadcasted
-            # to `p.shape[:-1]` in the call to `vsearchsorted` below.
-            if len(size) < (p.ndim - 1):
-                raise ValueError("`size` is incompatible with the shape of `p`")
-            for s, ps in zip(reversed(size), reversed(p.shape[:-1])):
+            # Check that `shape` would not be broadcasted to `p.shape[:-1]` in the call to `vsearchsorted` below.
+            if len(shape) < (p.ndim - 1):
+                raise ValueError("`shape` argument is incompatible with the shape of `p`")
+            for s, ps in zip(reversed(shape), reversed(p.shape[:-1])):
                 if s == 1 and ps != 1:
-                    raise ValueError("`size` is incompatible with the shape of `p`")
+                    raise ValueError("`shape` argument is incompatible with the shape of `p`")
 
-        unif_samples = rng.uniform(size=size)
+        unif_samples = rng.uniform(size=shape)
         samples = vsearchsorted(p.cumsum(axis=-1), unif_samples)
 
         return samples
@@ -1903,7 +1813,7 @@ class RandIntRV(RandomVariable):
     dtype = "int64"
     _print_name = ("randint", "\\operatorname{randint}")
 
-    def __call__(self, low, high=None, size=None, **kwargs):
+    def __call__(self, low, high=None, shape=None, **kwargs):
         r"""Draw samples from a discrete uniform distribution.
 
         Signature
@@ -1921,16 +1831,14 @@ class RandIntRV(RandomVariable):
         high
             Upper boundary of the output interval.  All values generated
             will be smaller than `high` (exclusive).
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-            independent, identically distributed samples are
-            returned. Default is `None`, in which case a single
-            sample is returned.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+            independent samples are returned.
 
         """
         if high is None:
             low, high = 0, low
-        return super().__call__(low, high, size=size, **kwargs)
+        return super().__call__(low, high, shape=shape, **kwargs)
 
     def make_node(self, rng, *args, **kwargs):
         if not isinstance(
@@ -1955,7 +1863,7 @@ class IntegersRV(RandomVariable):
     dtype = "int64"
     _print_name = ("integers", "\\operatorname{integers}")
 
-    def __call__(self, low, high=None, size=None, **kwargs):
+    def __call__(self, low, high=None, shape=None, **kwargs):
         r"""Draw samples from a discrete uniform distribution.
 
         Signature
@@ -1971,16 +1879,14 @@ class IntegersRV(RandomVariable):
         high
             Upper boundary of the output interval.  All values generated
             will be smaller than `high` (exclusive).
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n * k`
-            independent, identically distributed samples are
-            returned. Default is `None`, in which case a single sample
-            is returned.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n * k`
+            independent samples are returned.
 
         """
         if high is None:
             low, high = 0, low
-        return super().__call__(low, high, size=size, **kwargs)
+        return super().__call__(low, high, shape=shape, **kwargs)
 
     def make_node(self, rng, *args, **kwargs):
         if not isinstance(
@@ -2007,21 +1913,18 @@ class ChoiceRV(RandomVariable):
     def rng_fn(cls, rng, a, p, replace, size):
         return rng.choice(a, size, replace, p)
 
-    def _supp_shape_from_params(self, *args, **kwargs):
-        raise NotImplementedError()
-
-    def _infer_shape(self, size, dist_params, param_shapes=None):
+    def _infer_shape(self, shape, dist_params, param_shapes=None):
         a, p, _ = dist_params
         if isinstance(p.type, pytensor.tensor.type_other.NoneTypeT):
             param_shapes = param_shapes[:1] if param_shapes is not None else None
-            shape = super()._infer_shape(size, (a,), param_shapes)
+            shape = super()._infer_shape(shape, (a,), param_shapes)
         else:
             param_shapes = param_shapes[:2] if param_shapes is not None else None
-            shape = super()._infer_shape(size, (a, p), param_shapes)
+            shape = super()._infer_shape(shape, (a, p), param_shapes)
 
         return shape
 
-    def __call__(self, a, size=None, replace=True, p=None, **kwargs):
+    def __call__(self, a, shape=None, replace=True, p=None, **kwargs):
         r"""Generate a random sample from an array.
 
         Signature
@@ -2032,12 +1935,10 @@ class ChoiceRV(RandomVariable):
         Parameters
         ----------
         a
-            The array from which to randomly sample an element. If an int,
-            a sample is generated from `pytensor.tensor.arange(a)`.
-        size
-            Sample shape. If the given size is `(m, n, k)`, then `m * n *
-            k` independent samples are returned. Default is `None`, in
-            which case a single sample is returned.
+            The array from which to randomly sample an element.
+        shape
+            Sample shape. If the given shape is `(m, n, k)`, then `m * n *
+            k` independent samples are returned.
         replace
             When `True`, sampling is performed with replacement.
         p
@@ -2046,19 +1947,45 @@ class ChoiceRV(RandomVariable):
         """
         a = as_tensor_variable(a)
 
-        if a.ndim == 0:
-            a = pytensor.tensor.arange(a)
-
         if p is None:
             p = pytensor.tensor.type_other.NoneConst
 
         if isinstance(replace, bool):
             replace = pytensor.tensor.constant(np.array(replace))
 
-        return super().__call__(a, p, replace, size=size, dtype=a.dtype, **kwargs)
+        return super().__call__(a, p, replace, shape=shape, dtype=a.dtype, **kwargs)
 
 
-choice = ChoiceRV()
+_choice = ChoiceRV()
+
+
+def choice(a, shape=None, replace=True, p=None, **kwargs):
+    r"""Generate a random sample from an array.
+
+    Signature
+    ---------
+
+    `(x) -> ()`
+
+    Parameters
+    ----------
+    a
+        The array from which to randomly sample an element. If an int,
+        a sample is generated from `pytensor.tensor.arange(a)`.
+    shape
+        Sample shape. If the given shape is `(m, n, k)`, then `m * n *
+        k` independent samples are returned.
+    replace
+        When `True`, sampling is performed with replacement.
+    p
+        The probabilities associated with each entry in `a`. If not
+        given, all elements have equal probability.
+    """
+    a = as_tensor_variable(a)
+    if a.ndim == 0:
+        a = pytensor.tensor.arange(a)
+
+    return _choice(a, shape=shape, replace=replace, p=p, **kwargs)
 
 
 class PermutationRV(RandomVariable):

@@ -120,31 +120,31 @@ def broadcast_params(params, ndims_params):
     return bcast_params
 
 
-def normalize_size_param(
-    size: Optional[Union[int, np.ndarray, Variable, Sequence]]
+def normalize_shape_param(
+    shape: Optional[Union[int, np.ndarray, Variable, Sequence]]
 ) -> Variable:
     """Create an PyTensor value for a ``RandomVariable`` ``size`` parameter."""
-    if size is None:
-        size = constant([], dtype="int64")
-    elif isinstance(size, int):
-        size = as_tensor_variable([size], ndim=1)
-    elif not isinstance(size, (np.ndarray, Variable, Sequence)):
+    if shape is None:
+        shape = constant([], dtype="int64")
+    elif isinstance(shape, int):
+        shape = as_tensor_variable([shape], ndim=1)
+    elif not isinstance(shape, (np.ndarray, Variable, Sequence)):
         raise TypeError(
-            "Parameter size must be None, an integer, or a sequence with integers."
+            "Parameter shape must be None, an integer, or a sequence with integers."
         )
     else:
-        size = cast(as_tensor_variable(size, ndim=1, dtype="int64"), "int64")
+        shape = cast(as_tensor_variable(shape, ndim=1, dtype="int64"), "int64")
 
-        if not isinstance(size, Constant):
-            # This should help ensure that the length of non-constant `size`s
+        if not isinstance(shape, Constant):
+            # This should help ensure that the length of non-constant `shape`s
             # will be available after certain types of cloning (e.g. the kind
             # `Scan` performs)
-            size = specify_shape(size, (get_vector_length(size),))
+            shape = specify_shape(shape, (get_vector_length(shape),))
 
-    assert not any(s is None for s in size.type.shape)
-    assert size.dtype in int_dtypes
+    assert not any(s is None for s in shape.type.shape)
+    assert shape.dtype in int_dtypes
 
-    return size
+    return shape
 
 
 class RandomStream:
@@ -293,7 +293,7 @@ def supp_shape_from_ref_param_shape(
     dist_params: Sequence[Variable],
     param_shapes: Optional[Sequence[Tuple[ScalarVariable, ...]]] = None,
     ref_param_idx: int,
-) -> Union[TensorVariable, Tuple[ScalarVariable, ...]]:
+) -> Tuple[Union[ScalarVariable, TensorVariable], ...]:
     """Extract the support shape of a multivariate `RandomVariable` from the shape of a reference parameter.
 
     Several multivariate `RandomVariable`s have a support shape determined by the last dimensions of a parameter.
@@ -331,4 +331,4 @@ def supp_shape_from_ref_param_shape(
                 "Reference parameter does not match the expected dimensions; "
                 f"{ref_param} has less than {ndim_supp} dim(s)."
             )
-        return ref_param.shape[-ndim_supp:]
+        return tuple(ref_param.shape[-ndim_supp:])

@@ -23,7 +23,7 @@ from pytensor.tensor.random.basic import (
 from pytensor.tensor.random.op import RandomVariable
 from pytensor.tensor.random.rewriting import (
     local_dimshuffle_rv_lift,
-    local_rv_size_lift,
+    local_rv_shape_lift,
     local_subtensor_rv_lift,
 )
 from pytensor.tensor.rewriting.shape import ShapeFeature, ShapeOptimizer
@@ -190,11 +190,11 @@ def test_inplace_rewrites_extra_props():
         ),
     ],
 )
-def test_local_rv_size_lift(dist_op, dist_params, size):
+def test_local_rv_shape_lift(dist_op, dist_params, size):
     rng = shared(np.random.default_rng(1233532), borrow=False)
 
     new_out, f_inputs, dist_st, f_rewritten = apply_local_rewrite_to_rv(
-        local_rv_size_lift,
+        local_rv_shape_lift,
         lambda rv: rv,
         dist_op,
         dist_params,

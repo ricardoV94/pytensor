@@ -66,31 +66,43 @@ optdb.register(
 
 
 @node_rewriter(tracks=None)
-def local_rv_size_lift(fgraph, node):
+def local_rv_shape_lift(fgraph, node):
     """Lift the ``size`` parameter in a ``RandomVariable``.
 
     In other words, this will broadcast the distribution parameters by adding
-    the extra dimensions implied by the ``size`` parameter, and remove the
-    ``size`` parameter in the process.
+    the extra dimensions implied by the ``shape`` parameter, and remove the
+    ``shape`` parameter in the process.
 
-    For example, ``normal(0, 1, size=(1, 2))`` becomes
-    ``normal([[0, 0]], [[1, 1]], size=())``.
+    For example, ``normal(0, 1, shape=(1, 2))`` becomes
+    ``normal([[0, 0]], [[1, 1]], shpae=())``.
 
     """
 
     if not isinstance(node.op, RandomVariable):
         return
 
-    rng, size, dtype, *dist_params = node.inputs
+    rng, shape, dtype, *dist_params = node.inputs
+
+    # Test if RandomVariable can infer the support shape automatically,
+    # otherwise we cannot apply this rewrite
+    try:
+        node.op._infer_shape([], dist_params)
+    except NotImplementedError:
+        return None
+
+    if node.op.ndim_supp == 0:
+        size = tuple(shape)
+    else:
+        size = tuple(shape)[:-1]
 
     dist_params = broadcast_params(dist_params, node.op.ndims_params)
 
-    if get_vector_length(size) > 0:
+    if get_vector_length(shape) > 0:
         dist_params = [
             broadcast_to(
                 p,
                 (
-                    tuple(size)
+                    size
                     + (
                         tuple(p.shape)[-node.op.ndims_params[i] :]
                         if node.op.ndims_params[i] > 0
@@ -141,7 +153,7 @@ def local_dimshuffle_rv_lift(fgraph, node):
         return False
 
     rv_op = rv_node.op
-    rng, size, dtype, *dist_params = rv_node.inputs
+    rng, shape, dtype, *dist_params = rv_node.inputs
     rv = rv_node.default_output()
 
     # Check that Dimshuffle does not affect support dims
@@ -156,22 +168,18 @@ def local_dimshuffle_rv_lift(fgraph, node):
     if is_rv_used_in_graph(base_rv, node, fgraph):
         return False
 
-    batched_dims = rv.ndim - rv_op.ndim_supp
-    batched_dims_ds_order = tuple(o for o in ds_op.new_order if o not in supp_dims)
-
-    # Make size explicit
-    missing_size_dims = batched_dims - get_vector_length(size)
-    if missing_size_dims > 0:
-        full_size = tuple(broadcast_params(dist_params, rv_op.ndims_params)[0].shape)
-        size = full_size[:missing_size_dims] + tuple(size)
-
-    # Update the size to reflect the DimShuffled dimensions
-    new_size = [
-        constant(1, dtype="int64") if o == "x" else size[o]
-        for o in batched_dims_ds_order
-    ]
+    # If shape was provided, updated it to reflect the dimshuffled dimensions
+    if get_vector_length(shape) > 0:
+        new_shape = [
+            constant(1, dtype="int64") if o == "x" else shape[o]
+            for o in ds_op.new_order
+        ]
+    else:
+        new_shape = None
 
     # Updates the params to reflect the Dimshuffled dimensions
+    batched_dims = rv.ndim - rv_op.ndim_supp
+    batched_dims_ds_order = tuple(o for o in ds_op.new_order if o not in supp_dims)
     new_dist_params = []
     for param, param_ndim_supp in zip(dist_params, rv_op.ndims_params):
         # Add broadcastable dimensions to the parameters that would have been expanded by the size
@@ -185,7 +193,7 @@ def local_dimshuffle_rv_lift(fgraph, node):
         )
         new_dist_params.append(param.dimshuffle(param_new_order))
 
-    new_node = rv_op.make_node(rng, new_size, dtype, *new_dist_params)
+    new_node = rv_op.make_node(rng, new_shape, dtype, *new_dist_params)
 
     if config.compute_test_value != "off":
         compute_test_value(new_node)
@@ -233,7 +241,7 @@ def local_subtensor_rv_lift(fgraph, node):
         return None
 
     rv_op = rv_node.op
-    rng, size, dtype, *dist_params = rv_node.inputs
+    rng, shape, dtype, *dist_params = rv_node.inputs
 
     # Parse indices
     idx_list = getattr(subtensor_op, "idx_list", None)
@@ -284,7 +292,7 @@ def local_subtensor_rv_lift(fgraph, node):
         return False
 
     # Update the size to reflect the indexed dimensions
-    new_size = output_shape[: len(output_shape) - rv_op.ndim_supp]
+    new_shape = output_shape
 
     # Propagate indexing to the parameters' batch dims.
     # We try to avoid broadcasting the parameters together (and with size), by only indexing
@@ -346,7 +354,7 @@ def local_subtensor_rv_lift(fgraph, node):
         new_dist_params.append(batch_param[tuple(batch_indices)])
 
     # Create new RV
-    new_node = rv_op.make_node(rng, new_size, dtype, *new_dist_params)
+    new_node = rv_op.make_node(rng, new_shape, dtype, *new_dist_params)
     new_rv = new_node.default_output()
 
     copy_stack_trace(rv, new_rv)

@@ -10,6 +10,7 @@ from numpy.random.bit_generator import (  # type: ignore[attr-defined]
 import pytensor.tensor.random.basic as aer
 from pytensor.link.jax.dispatch.basic import jax_funcify, jax_typify
 from pytensor.link.jax.dispatch.shape import JAXShapeTuple
+from pytensor.tensor import get_vector_length
 from pytensor.tensor.shape import Shape, Shape_i
 
 
@@ -89,26 +90,49 @@ def jax_typify_Generator(rng, **kwargs):
 @jax_funcify.register(aer.RandomVariable)
 def jax_funcify_RandomVariable(op, node, **kwargs):
     """JAX implementation of random variables."""
+
+    # FIXME: This logic is not well covered by current tests
+    shape = node.inputs[1]
     rv = node.outputs[1]
     out_dtype = rv.type.dtype
-    out_size = rv.type.shape
+    out_static_shape = rv.type.shape
 
-    if op.ndim_supp > 0:
-        out_size = node.outputs[1].type.shape[: -op.ndim_supp]
+    shape_provided = get_vector_length(shape) > 0
 
     # If one dimension has unknown size, either the size is determined
     # by a `Shape` operator in which case JAX will compile, or it is
     # not and we fail gracefully.
-    if None in out_size:
+    if None in out_static_shape:
         assert_size_argument_jax_compatible(node)
 
-        def sample_fn(rng, size, dtype, *parameters):
-            return jax_sample_fn(op)(rng, size, out_dtype, *parameters)
+        def sample_fn(rng, shape, dtype, *parameters):
+            if shape_provided:
+                if op.ndim_supp == 0:
+                    size = shape
+                else:
+                    size = shape[:-op.ndim_supp]
+            else:
+                size = ()
+
+            next_rng, samples = jax_sample_fn(op)(rng, size, out_dtype, *parameters)
+
+            if shape_provided:
+                assert jax.numpy.asarray(samples).shape == tuple(shape)
+
+            return next_rng, samples
 
     else:
+        if op.ndim_supp == 0:
+            out_static_size = out_static_shape
+        else:
+            out_static_size = out_static_shape[:-op.ndim_supp]
 
         def sample_fn(rng, size, dtype, *parameters):
-            return jax_sample_fn(op)(rng, out_size, out_dtype, *parameters)
+            next_rng, samples = jax_sample_fn(op)(rng, out_static_size, out_dtype, *parameters)
+
+            assert jax.numpy.asarray(samples).shape == out_static_shape
+
+            return next_rng, samples
 
     return sample_fn
 

@@ -26,9 +26,9 @@ from pytensor.tensor.random.op import RandomVariable
 
 
 @node_rewriter([RandomVariable])
-def size_parameter_as_tuple(fgraph, node):
+def random_shape_parameter_as_tuple(fgraph, node):
     """Replace `MakeVector` and `DimShuffle` (when used to transform a scalar
-    into a 1d vector) when they are found as the input of a `size` or `shape`
+    into a 1d vector) when they are found as the input of a `shape`
     parameter by `JAXShapeTuple` during transpilation.
 
     The JAX implementations of `MakeVector` and `DimShuffle` always return JAX
@@ -44,24 +44,24 @@ def size_parameter_as_tuple(fgraph, node):
     """
     from pytensor.link.jax.dispatch.shape import JAXShapeTuple
 
-    size_arg = node.inputs[1]
-    size_node = size_arg.owner
+    shape_arg = node.inputs[1]
+    shape_node = shape_arg.owner
 
-    if size_node is None:
+    if shape_node is None:
         return
 
-    if isinstance(size_node.op, JAXShapeTuple):
+    if isinstance(shape_node.op, JAXShapeTuple):
         return
 
-    if isinstance(size_node.op, MakeVector) or (
-        isinstance(size_node.op, DimShuffle)
-        and size_node.op.input_broadcastable == ()
-        and size_node.op.new_order == ("x",)
+    if isinstance(shape_node.op, MakeVector) or (
+        isinstance(shape_node.op, DimShuffle)
+        and shape_node.op.input_broadcastable == ()
+        and shape_node.op.new_order == ("x",)
     ):
         # Here PyTensor converted a tuple or list to a tensor
-        new_size_args = JAXShapeTuple()(*size_node.inputs)
+        new_size_arg = JAXShapeTuple()(*shape_node.inputs)
         new_inputs = list(node.inputs)
-        new_inputs[1] = new_size_args
+        new_inputs[1] = new_size_arg
 
         new_node = node.clone_with_new_inputs(new_inputs)
         return new_node.outputs
@@ -145,54 +145,54 @@ def beta_binomial_from_beta_binomial(fgraph, node):
     return [next_rng, b]
 
 
-random_vars_opt = SequenceDB()
-random_vars_opt.register(
+random_vars_rewrites = SequenceDB()
+random_vars_rewrites.register(
     "lognormal_from_normal",
     in2out(lognormal_from_normal),
     "jax",
 )
-random_vars_opt.register(
+random_vars_rewrites.register(
     "halfnormal_from_normal",
     in2out(halfnormal_from_normal),
     "jax",
 )
-random_vars_opt.register(
+random_vars_rewrites.register(
     "geometric_from_uniform",
     in2out(geometric_from_uniform),
     "jax",
 )
-random_vars_opt.register(
+random_vars_rewrites.register(
     "negative_binomial_from_gamma_poisson",
     in2out(negative_binomial_from_gamma_poisson),
     "jax",
 )
-random_vars_opt.register(
+random_vars_rewrites.register(
     "inverse_gamma_from_gamma",
     in2out(inverse_gamma_from_gamma),
     "jax",
 )
-random_vars_opt.register(
+random_vars_rewrites.register(
     "chi_square_from_gamma",
     in2out(chi_square_from_gamma),
     "jax",
 )
-random_vars_opt.register(
+random_vars_rewrites.register(
     "generalized_gamma_from_gamma",
     in2out(generalized_gamma_from_gamma),
     "jax",
 )
-random_vars_opt.register(
+random_vars_rewrites.register(
     "wald_from_normal_uniform",
     in2out(wald_from_normal_uniform),
     "jax",
 )
-random_vars_opt.register(
+random_vars_rewrites.register(
     "beta_binomial_from_beta_binomial",
     in2out(beta_binomial_from_beta_binomial),
     "jax",
 )
-optdb.register("jax_random_vars_rewrites", random_vars_opt, "jax", position=110)
+optdb.register("jax_random_vars_rewrites", random_vars_rewrites, "jax", position=110)
 
 optdb.register(
-    "jax_size_parameter_as_tuple", in2out(size_parameter_as_tuple), "jax", position=100
+    "jax_random_shape_parameter_as_tuple", in2out(random_shape_parameter_as_tuple), "jax", position=100
 )
