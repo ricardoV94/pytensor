@@ -1503,6 +1503,15 @@ class Alloc(COp):
             int need_new_out;
             """
 
+        # Check input has expected number of dimensions
+        code += f"""
+            if (PyArray_NDIM({vv}) != {v_ndim})
+            {{
+                PyErr_SetString(PyExc_ValueError, "Input of alloc has wrong number of dimensions.");
+                {fail}
+            }}
+        """
+
         # Initialize shape
         for i, shp_i in enumerate(inp[1:]):
             code += f"""
@@ -1523,7 +1532,7 @@ class Alloc(COp):
                 """
 
         code += f"""
-            need_new_out = (NULL == {zz});
+            need_new_out = (NULL == {zz} || PyArray_NDIM({zz}) != {o_ndim});
             for (int i = 0; i < {o_ndim}; i++)
                 need_new_out = (need_new_out || (PyArray_DIMS({zz})[i] != shape[i]));
 
@@ -1546,7 +1555,7 @@ class Alloc(COp):
         return code
 
     def c_code_cache_version(self):
-        return (4,)
+        return (5,)
 
     def infer_shape(self, fgraph, node, input_shapes):
         return [node.inputs[1:]]

@@ -902,6 +902,16 @@ class TestAlloc:
             np.zeros((5, 3), dtype=floatX),
         )
 
+    def test_input_ndim_check(self):
+        x_m = matrix("x", shape=(None, None), dtype="float64")
+        out = alloc(x_m, 5, 4, 3)
+        f = pytensor.function([x_m], out, mode=Mode("c"))
+        f.trust_input = True
+        with pytest.raises(
+            ValueError, match="Input of alloc has wrong number of dimensions."
+        ):
+            f(np.zeros((3,)))
+
     @pytest.mark.parametrize("mode", (Mode("py"), Mode("c")))
     def test_runtime_broadcast(self, mode):
         self.check_runtime_broadcast(mode)
