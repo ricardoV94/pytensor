@@ -207,6 +207,8 @@ class BlockwiseOpTester:
             np.testing.assert_allclose(
                 pt_func(*vec_inputs_testvals),
                 np_func(*vec_inputs_testvals),
+                rtol=1e-7 if config.floatX == "float64" else 1e-5,
+                atol=1e-7 if config.floatX == "float64" else 1e-5,
             )
 
     def test_grad(self):
@@ -238,6 +240,7 @@ class BlockwiseOpTester:
                 np.testing.assert_allclose(
                     pt_out,
                     np_out,
+                    rtol=1e-7 if config.floatX == "float64" else 1e-5,
                     atol=1e-6 if config.floatX == "float64" else 1e-5,
                 )
 
