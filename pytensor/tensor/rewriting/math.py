@@ -33,8 +33,9 @@ from pytensor.tensor.basic import (
     get_underlying_scalar_constant_value,
     ones_like,
     switch,
-    zeros_like,
+    zeros_like, swapaxes, moveaxis,
 )
+from pytensor.tensor.blas import Dot22
 from pytensor.tensor.elemwise import CAReduce, DimShuffle, Elemwise
 from pytensor.tensor.exceptions import NotScalarConstantError
 from pytensor.tensor.extra_ops import broadcast_arrays
@@ -47,7 +48,7 @@ from pytensor.tensor.math import (
     Prod,
     ProdWithoutZeros,
     Sum,
-    _conj,
+    _conj, _matrix_matrix_matmul,
 )
 from pytensor.tensor.math import abs as at_abs
 from pytensor.tensor.math import (
@@ -3638,3 +3639,64 @@ def local_useless_conj(fgraph, node):
     x = node.inputs[0]
     if x.type.dtype not in complex_dtypes:
         return [x]
+
+
+@register_specialize
+@node_rewriter([Sum])
+def sum_of_outer_product_as_matmul(fgraph, node):
+    """Rewrite Sum(a[:, :, None] * b[:, None, :], 0) -> swapaxes(a, -1, -2) @ b
+
+    The reduced axes can be in any batch position originally.
+    """
+    sum_axes = node.op.axis
+
+    if sum_axes is None:
+        return None
+
+    [ab] = node.inputs
+
+    # Make axes negative
+    assert all(axis >= 0 for axis in sum_axes)  # This should be enforced by the make_node, just a sanity check
+    sum_axes = tuple(axis - ab.type.ndim for axis in sum_axes)
+
+    if -1 in sum_axes or -2 in sum_axes:
+        return None
+
+    if not(
+        ab.owner
+        and (
+            (ab.owner.op == mul and len(ab.owner.inputs) == 2)
+            or (ab.owner.op == _matrix_matrix_matmul)
+        )
+    ):
+        return None
+
+    a, b = ab.owner.inputs
+    a_bcast, b_bcast = a.type.broadcastable, b.type.broadcastable
+    # Check we have a[..., :, None], b[..., None, :]
+    if not (not a_bcast[-2] and a_bcast[-1] and b_bcast[-2] and not b_bcast[-1]):
+        # For Elemwise outer mul, any axis and order works
+        if ab.owner.op == mul:
+            # TODO: For now we only allow swapping a, b, but any other axis should work?
+            a, b = b, a
+            a_bcast, b_bcast = a.type.broadcastable, b.type.broadcastable
+            if not (not a_bcast[-2] and a_bcast[-1] and b_bcast[-2] and not b_bcast[-1]):
+                return None
+        else:
+            return None
+
+    # Check that any of the reduced dimension is not degenerate
+    candidate_axes = [axis for axis in sum_axes if not(a_bcast[axis] or b_bcast[axis])]
+    if not candidate_axes:
+        return None
+
+    # Choose the largest known candidate axis
+    ab_static_shape = ab.type.shape
+    dot_axis = max(candidate_axes, key=lambda axis: ab_static_shape[axis])
+    new_sum_axes = tuple(axis + 1 if axis < dot_axis else axis for axis in sum_axes if axis != dot_axis)
+
+    new_out = moveaxis(a.squeeze(-1), dot_axis + 1, -1) @ moveaxis(b.squeeze(-2), dot_axis + 1, -2)
+    if new_sum_axes:
+        new_out = new_out.sum(new_sum_axes)
+
+    return [new_out]
