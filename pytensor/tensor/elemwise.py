@@ -1129,6 +1129,7 @@ class Elemwise(OpenMPOp):
             # Disable C code for float16 vars
             raise NotImplementedError()
         code = "\n".join(self._c_all(node, nodename, inames, onames, sub))
+        print(code)
         return code
 
     def c_headers(self, **kwargs):
@@ -1145,6 +1146,7 @@ class Elemwise(OpenMPOp):
         return support_code
 
     def c_code_cache_version_apply(self, node):
+        return None
         version = [15]  # the version corresponding to the c code in this Op
 
         # now we insert versions for the ops on which we depend...
@@ -1466,15 +1468,16 @@ class CAReduce(COp):
             return ((),)
         return ([ishape[i] for i in range(node.inputs[0].type.ndim) if i not in axis],)
 
-    def _c_all(self, node, name, inames, onames, sub):
-        input = node.inputs[0]
-        output = node.outputs[0]
+    def _c_all(self, node, name, input_names, output_names, sub):
+        [inp] = node.inputs
+        [out] = node.outputs
+        ndim = inp.type.ndim
 
-        iname = inames[0]
-        oname = onames[0]
+        [inp_name] = input_names
+        [out_name] = output_names
 
-        idtype = input.type.dtype_specs()[1]
-        odtype = output.type.dtype_specs()[1]
+        inp_dtype = inp.type.dtype_specs()[1]
+        out_dtype = out.type.dtype_specs()[1]
 
         acc_dtype = getattr(self, "acc_dtype", None)
 
@@ -1482,100 +1485,101 @@ class CAReduce(COp):
             if acc_dtype == "float16":
                 raise MethodNotDefined("no c_code for float16")
             acc_type = TensorType(shape=node.outputs[0].type.shape, dtype=acc_dtype)
-            adtype = acc_type.dtype_specs()[1]
+            acc_dtype = acc_type.dtype_specs()[1]
         else:
-            adtype = odtype
+            acc_dtype = out_dtype
 
         axis = self.axis
         if axis is None:
-            axis = list(range(input.type.ndim))
+            axis = list(range(inp.type.ndim))
 
         if len(axis) == 0:
+            # This is just an Elemwise cast operation
             # The acc_dtype is never a downcast compared to the input dtype
             # So we just need a cast to the output dtype.
-            var = pytensor.tensor.basic.cast(input, node.outputs[0].dtype)
-            if var is input:
-                var = Elemwise(scalar_identity)(input)
+            var = pytensor.tensor.basic.cast(inp, node.outputs[0].dtype)
+            if var is inp:
+                var = Elemwise(scalar_identity)(inp)
             assert var.dtype == node.outputs[0].dtype
-            return var.owner.op._c_all(var.owner, name, inames, onames, sub)
+            return var.owner.op._c_all(var.owner, name, input_names, output_names, sub)
 
-        order1 = [i for i in range(input.type.ndim) if i not in axis]
-        order = order1 + list(axis)
+        inp_loop_order = list(range(ndim))
+        non_reduced_axis = [i for i in inp_loop_order if i not in axis]
+        counter = iter(range(ndim))
+        out_loop_order = ["x" if i in axis else next(counter) for i in range(ndim)]
 
-        nnested = len(order1)
+        # order1 = [i for i in range(input.type.ndim) if i not in axis]
+        # order = order1 + list(axis)
+        # order = list(axis) + order1
 
-        sub = dict(sub)
-        for i, (input, iname) in enumerate(zip(node.inputs, inames)):
-            sub[f"lv{i}"] = iname
+        # nnested = len(order1)
+
+        sub = sub.copy()
+        sub["lv0"] = inp_name
+        sub["lv1"] = out_name
+        sub["olv"] = out_name
 
         decl = ""
-        if adtype != odtype:
+        if acc_dtype != out_dtype:
             # Create an accumulator variable different from the output
-            aname = "acc"
-            decl = acc_type.c_declare(aname, sub)
-            decl += acc_type.c_init(aname, sub)
+            acc_name = "acc"
+            decl = acc_type.c_declare(acc_name, sub)
+            decl += acc_type.c_init(acc_name, sub)
         else:
             # the output is the accumulator variable
-            aname = oname
+            acc_name = out_name
 
-        decl += cgen.make_declare([order], [idtype], sub)
-        checks = cgen.make_checks([order], [idtype], sub)
-
-        alloc = ""
-        i += 1
-        sub[f"lv{i}"] = oname
-        sub["olv"] = oname
+        # Define strides and jump of input array
+        decl += cgen.make_declare([inp_loop_order], [inp_dtype], sub)
+        checks = cgen.make_checks([inp_loop_order], [inp_dtype], sub)
 
         # Allocate output buffer
+        alloc = ""
         alloc += cgen.make_declare(
-            [list(range(nnested)) + ["x"] * len(axis)], [odtype], dict(sub, lv0=oname)
+            [out_loop_order], [out_dtype], sub | {"lv0": out_name}
         )
-        alloc += cgen.make_alloc([order1], odtype, sub)
+        alloc += cgen.make_alloc([non_reduced_axis], out_dtype, sub)
         alloc += cgen.make_checks(
-            [list(range(nnested)) + ["x"] * len(axis)], [odtype], dict(sub, lv0=oname)
+            [out_loop_order], [out_dtype], sub | {"lv0": out_name}
         )
 
-        if adtype != odtype:
+        if acc_dtype != out_dtype:
             # Allocate accumulation buffer
-            sub[f"lv{i}"] = aname
-            sub["olv"] = aname
+            sub["lv1"] = acc_name
+            sub["olv"] = acc_name
 
             alloc += cgen.make_declare(
-                [list(range(nnested)) + ["x"] * len(axis)],
-                [adtype],
-                dict(sub, lv0=aname),
+                [out_loop_order], [acc_dtype], sub | {"lv0": acc_name}
             )
-            alloc += cgen.make_alloc([order1], adtype, sub)
+            alloc += cgen.make_alloc(
+                [[axis for axis in out_loop_order if axis != "x"]], [acc_dtype], sub
+            )
             alloc += cgen.make_checks(
-                [list(range(nnested)) + ["x"] * len(axis)],
-                [adtype],
-                dict(sub, lv0=aname),
+                [out_loop_order], [acc_dtype], sub | {"lv0": acc_name}
             )
 
         identity = self.scalar_op.identity
 
         if np.isposinf(identity):
-            if input.type.dtype in ("float32", "float64"):
+            if inp.type.dtype in ("float32", "float64"):
                 identity = "__builtin_inf()"
-            elif input.type.dtype.startswith("uint") or input.type.dtype == "bool":
+            elif inp.type.dtype.startswith("uint") or inp.type.dtype == "bool":
                 identity = "1"
             else:
-                identity = "NPY_MAX_" + str(input.type.dtype).upper()
+                identity = "NPY_MAX_" + str(inp.type.dtype).upper()
         elif np.isneginf(identity):
-            if input.type.dtype in ("float32", "float64"):
+            if inp.type.dtype in ("float32", "float64"):
                 identity = "-__builtin_inf()"
-            elif input.type.dtype.startswith("uint") or input.type.dtype == "bool":
+            elif inp.type.dtype.startswith("uint") or inp.type.dtype == "bool":
                 identity = "0"
             else:
-                identity = "NPY_MIN_" + str(input.type.dtype).upper()
+                identity = "NPY_MIN_" + str(inp.type.dtype).upper()
         elif identity is None:
             raise TypeError(f"The {self.scalar_op} does not define an identity.")
 
-        task0_decl = f"{adtype}& {aname}_i = *{aname}_iter;\n{aname}_i = {identity};"
+        initial_value = f"{acc_name}_i = {identity};"
 
-        task1_decl = f"{idtype}& {inames[0]}_i = *{inames[0]}_iter;\n"
-
-        task1_code = self.scalar_op.c_code(
+        inner_task = self.scalar_op.c_code(
             Apply(
                 self.scalar_op,
                 [
@@ -1588,47 +1592,31 @@ class CAReduce(COp):
                 ],
             ),
             None,
-            [f"{aname}_i", f"{inames[0]}_i"],
-            [f"{aname}_i"],
+            [f"{acc_name}_i", f"{input_names[0]}_i"],
+            [f"{acc_name}_i"],
             sub,
         )
-        code1 = f"""
-        {{
-            {task1_decl}
-            {task1_code}
-        }}
-        """
 
-        if node.inputs[0].type.ndim:
-            if len(axis) == 1:
-                all_code = [("", "")] * nnested + [(task0_decl, code1), ""]
-            else:
-                all_code = (
-                    [("", "")] * nnested
-                    + [(task0_decl, "")]
-                    + [("", "")] * (len(axis) - 2)
-                    + [("", code1), ""]
-                )
-        else:
-            all_code = [task0_decl + code1]
-        loop = cgen.make_loop_careduce(
-            [order, list(range(nnested)) + ["x"] * len(axis)],
-            [idtype, adtype],
-            all_code,
+        loop = cgen.make_reordered_loop_careduce(
+            [inp_loop_order, out_loop_order],
+            [inp_dtype, acc_dtype],
+            initial_value,
+            inner_task,
             sub,
         )
 
         end = ""
-        if adtype != odtype:
+        if acc_dtype != out_dtype:
             end = f"""
-            PyArray_CopyInto({oname}, {aname});
+            PyArray_CopyInto({out_name}, {acc_name});
             """
-            end += acc_type.c_cleanup(aname, sub)
+            end += acc_type.c_cleanup(acc_name, sub)
 
         return decl, checks, alloc, loop, end
 
     def c_code(self, node, name, inames, onames, sub):
         code = "\n".join(self._c_all(node, name, inames, onames, sub))
+        # print(code)
         return code
 
     def c_headers(self, **kwargs):
@@ -1636,6 +1624,7 @@ class CAReduce(COp):
         return ["<vector>", "<algorithm>"]
 
     def c_code_cache_version_apply(self, node):
+        return None
         # the version corresponding to the c code in this Op
         version = [9]
 
