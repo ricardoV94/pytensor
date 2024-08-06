@@ -572,8 +572,84 @@ def make_loop_careduce(loop_orders, dtypes, loop_tasks, sub):
 
 
 def make_reordered_loop_careduce(loop_orders, dtypes, initial_value, inner_task, sub):
-    ndim = len(loop_orders[0])
     inp_var = sub["lv0"]
+
+    loop_depth = len(loop_orders[0])
+    nvars = len(loop_orders)
+
+    # The loops are ordered by (decreasing) absolute values of inp_var's strides.
+    # The first element of each pair is the absolute value of the stride
+    # The second element correspond to the index in the initial loop order
+    order_loops = dedent(
+        f"""
+        std::vector< std::pair<int, int> > {inp_var}_loops({loop_depth});
+        std::vector< std::pair<int, int> >::iterator {inp_var}_loops_it = {inp_var}_loops.begin();
+        """
+    )
+
+    # Fill the loop vector with the appropriate <stride, index> pairs
+    for i, index in enumerate(loop_orders[0]):
+        strides = "0" if index == "x" else f"abs(PyArray_STRIDES({inp_var})[{index}])"
+        order_loops += dedent(
+            f"""
+            {inp_var}_loops_it->first = {strides};
+            {inp_var}_loops_it->second = {i};
+            ++{inp_var}_loops_it;
+            """
+        )
+
+    # We sort in decreasing order so that the outermost loop (loop 0)
+    # has the largest stride, and the innermost loop has the smallest stride.
+    order_loops += f"std::sort({inp_var}_loops.rbegin(), {inp_var}_loops.rend());"
+
+    # Get the (sorted) total number of iterations of each loop
+    declare_totals = f"int init_totals[{loop_depth}];\n"
+    for i in range(loop_depth):
+        f"init_totals[{i}] = {inp_var}_n{i};\n"
+
+    # Sort totals to match the new order that was computed by sorting
+    # the loop vector. One integer variable per loop is declared.
+    declare_totals += f"""
+    {inp_var}_loops_it = {inp_var}_loops.begin();
+    """
+    for i in range(loop_depth):
+        declare_totals += f"""
+        int TOTAL_{i} = init_totals[{inp_var}_loops_it->second];
+        ++{inp_var}_loops_it;
+        """
+
+    # Get sorted strides
+    # Get strides in the initial order
+    # We declare the initial strides as a 2D array, nvars x loop depth
+    strides_list = [
+        ", ".join(
+            f"{sub[f'lv{i}']}_stride{index}" if index != "x" else "0"
+            for index in loop_order
+        )
+        for i, loop_order in enumerate(loop_orders)
+        if loop_order
+    ]
+    strides = ",\n".join(strides_list)
+    declare_strides = f"""
+    int init_strides[{nvars}][{loop_depth}] = {{
+        {strides}
+    }};"""
+
+    # Declare (sorted) stride and for each variable
+    # we iterate from innermost loop to outermost loop
+    declare_strides += f"""
+    std::vector< std::pair<int, int> >::reverse_iterator {inp_var}_loops_rit;
+    """
+
+    for i in range(nvars):
+        var = sub[f"lv{i}"]
+        declare_strides += f"""
+        {inp_var}_loops_rit = {inp_var}_loops.rbegin();"""
+        for j in reversed(range(loop_depth)):
+            declare_strides += f"""
+            int {var}_stride_l{j} = init_strides[{i}][{inp_var}_loops_rit->second];
+            ++{inp_var}_loops_rit;
+            """
 
     declare_iter = ""
     for j, dtype in enumerate(dtypes):
@@ -584,15 +660,9 @@ def make_reordered_loop_careduce(loop_orders, dtypes, initial_value, inner_task,
     for j, (loop_order, dtype) in enumerate(zip(loop_orders, dtypes)):
         var = sub[f"lv{j}"]
         pointer_update += f"{dtype} &{var}_i = * ( {var}_iter"
-        loop_ndims = len([l for l in loop_order if l != "x"])
-        # Stride variables are suffixed by real dims, ignoring "x" in between
-        stride_counter = reversed(range(loop_ndims))
         for i, loop_dim in reversed(tuple(enumerate(loop_order))):
-            if loop_dim == "x":
-                continue
             iter_var = f"ITER_{i}"
-            # pointer_update += f"+{var}_stride_l{i}*{iter_var}"
-            pointer_update += f" + {var}_stride{next(stride_counter)}*{iter_var}"
+            pointer_update += f" + {var}_stride_l{i}*{iter_var}"
         pointer_update += ");\n"
 
     # Set initial value in first iteration of each output
@@ -606,14 +676,15 @@ def make_reordered_loop_careduce(loop_orders, dtypes, initial_value, inner_task,
     )
 
     # We set do pointer_update, set initial_value and inner task in inner loop
-    loop = "\n\n".join((pointer_update, set_initial_value, inner_task))
+    loop = "\n\n".join((pointer_update, f"{{{inner_task}}}"))
     # Create outer loops recursively
-    for i in reversed(range(ndim)):
+    for i in reversed(range(loop_depth)):
         iter_var = f"ITER_{i}"
-        dim_length = f"{inp_var}_n{i}"  # f"TOTAL_{i}"
+        dim_length = f"TOTAL_{i}"
 
         loop = dedent(
             f"""
+            printf("loop {i} total=%d", {dim_length});
             for(int {iter_var} = 0; {iter_var}<{dim_length}; {iter_var}++)
             {{ // begin loop {i}
                 {loop}
@@ -621,5 +692,5 @@ def make_reordered_loop_careduce(loop_orders, dtypes, initial_value, inner_task,
             """
         )
 
-    code = "\n".join((declare_iter, loop))
+    code = "\n".join((order_loops, declare_totals, declare_strides, declare_iter, loop))
     return f"{{\n{code}\n}}\n"

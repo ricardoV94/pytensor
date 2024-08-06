@@ -362,7 +362,10 @@ class FixedOpCAReduce(CAReduce):
 
 class NonZeroDimsCAReduce(FixedOpCAReduce):
     def _c_all(self, node, name, input_names, output_names, sub):
-        decl, checks, alloc, loop, end = super()._c_all(node, name, input_names, output_names, sub)
+        # TODO: FIXME
+        decl, checks, alloc, loop, end = super()._c_all(
+            node, name, input_names, output_names, sub
+        )
 
         # We add an additional check for zero-sized dimensions (This seems like
         # something that could enabled in `elemwise_cgen.make_checks`.)

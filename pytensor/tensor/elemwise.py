@@ -1,4 +1,5 @@
 from copy import copy
+from textwrap import dedent
 
 import numpy as np
 from numpy.core.numeric import normalize_axis_tuple
@@ -1508,58 +1509,46 @@ class CAReduce(COp):
         counter = iter(range(ndim))
         out_loop_order = ["x" if i in axis else next(counter) for i in range(ndim)]
 
-        # order1 = [i for i in range(input.type.ndim) if i not in axis]
-        # order = order1 + list(axis)
-        # order = list(axis) + order1
-
-        # nnested = len(order1)
-
         sub = sub.copy()
         sub["lv0"] = inp_name
         sub["lv1"] = out_name
         sub["olv"] = out_name
 
-        decl = ""
         if acc_dtype != out_dtype:
             # Create an accumulator variable different from the output
             acc_name = "acc"
-            decl = acc_type.c_declare(acc_name, sub)
-            decl += acc_type.c_init(acc_name, sub)
+            setup = acc_type.c_declare(acc_name, sub) + acc_type.c_init(acc_name, sub)
         else:
             # the output is the accumulator variable
             acc_name = out_name
+            setup = ""
 
-        # Define strides and jump of input array
-        decl += cgen.make_declare([inp_loop_order], [inp_dtype], sub)
-        checks = cgen.make_checks([inp_loop_order], [inp_dtype], sub)
+        # Define strides of input array
+        setup += cgen.make_declare(
+            [inp_loop_order], [inp_dtype], sub
+        ) + cgen.make_checks([inp_loop_order], [inp_dtype], sub)
 
-        # Allocate output buffer
-        alloc = ""
-        alloc += cgen.make_declare(
-            [out_loop_order], [out_dtype], sub | {"lv0": out_name}
-        )
-        alloc += cgen.make_alloc([non_reduced_axis], out_dtype, sub)
-        alloc += cgen.make_checks(
-            [out_loop_order], [out_dtype], sub | {"lv0": out_name}
+        # Define strides of output array and allocate it
+        out_sub = sub | {"lv0": out_name}
+        alloc = (
+            cgen.make_declare([out_loop_order], [out_dtype], out_sub)
+            + cgen.make_alloc([non_reduced_axis], out_dtype, sub)
+            + cgen.make_checks([out_loop_order], [out_dtype], out_sub)
         )
 
         if acc_dtype != out_dtype:
-            # Allocate accumulation buffer
+            # Define strides of accumulation buffer and allocate it
             sub["lv1"] = acc_name
             sub["olv"] = acc_name
 
-            alloc += cgen.make_declare(
-                [out_loop_order], [acc_dtype], sub | {"lv0": acc_name}
-            )
-            alloc += cgen.make_alloc(
-                [[axis for axis in out_loop_order if axis != "x"]], [acc_dtype], sub
-            )
-            alloc += cgen.make_checks(
-                [out_loop_order], [acc_dtype], sub | {"lv0": acc_name}
+            acc_sub = sub | {"lv0": acc_name}
+            alloc += (
+                cgen.make_declare([out_loop_order], [acc_dtype], acc_sub)
+                + cgen.make_alloc([non_reduced_axis], acc_dtype, sub)
+                + cgen.make_checks([out_loop_order], [acc_dtype], acc_sub)
             )
 
         identity = self.scalar_op.identity
-
         if np.isposinf(identity):
             if inp.type.dtype in ("float32", "float64"):
                 identity = "__builtin_inf()"
@@ -1592,31 +1581,38 @@ class CAReduce(COp):
                 ],
             ),
             None,
-            [f"{acc_name}_i", f"{input_names[0]}_i"],
+            [f"{acc_name}_i", f"{inp_name}_i"],
             [f"{acc_name}_i"],
             sub,
         )
 
-        loop = cgen.make_reordered_loop_careduce(
-            [inp_loop_order, out_loop_order],
-            [inp_dtype, acc_dtype],
-            initial_value,
-            inner_task,
-            sub,
-        )
+        if out.type.ndim == 0:
+            # Simple case where everything is reduced, no need for loop ordering
+            raise NotImplementedError()
+        else:
+            loop = cgen.make_reordered_loop_careduce(
+                [inp_loop_order, out_loop_order],
+                [inp_dtype, acc_dtype],
+                initial_value,
+                inner_task,
+                sub,
+            )
 
-        end = ""
         if acc_dtype != out_dtype:
-            end = f"""
-            PyArray_CopyInto({out_name}, {acc_name});
-            """
-            end += acc_type.c_cleanup(acc_name, sub)
+            final_cast = dedent(
+                f"""
+                PyArray_CopyInto({out_name}, {acc_name});
+                {acc_type.c_cleanup(acc_name, sub)}
+                """
+            )
+        else:
+            final_cast = ""
 
-        return decl, checks, alloc, loop, end
+        return setup, alloc, loop, final_cast
 
     def c_code(self, node, name, inames, onames, sub):
         code = "\n".join(self._c_all(node, name, inames, onames, sub))
-        # print(code)
+        print(code)
         return code
 
     def c_headers(self, **kwargs):
