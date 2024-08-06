@@ -985,3 +985,19 @@ class TestVectorize:
         assert isinstance(vect_node.op, Any)
         assert vect_node.op.axis == (1,)
         assert vect_node.inputs[0] is bool_tns
+
+
+@pytest.mark.parametrize("axis", (0, 1, 2))
+@pytest.mark.parametrize("c_contiguous", (True, False))
+def test_careduce_benchmark(axis, c_contiguous, benchmark):
+    N = 256
+    x_test = np.random.uniform(size=(N, N, N))
+
+    x = pytensor.shared(x_test, name="x", shape=x_test.shape)
+
+    if not c_contiguous:
+        x = x.transpose(2, 0, 1)
+
+    out = x.sum(axis=axis)
+    fn = pytensor.function([], out)
+    benchmark(fn)
