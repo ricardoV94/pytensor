@@ -1939,7 +1939,7 @@ class NodeProcessingGraphRewriter(GraphRewriter):
             )
         # None in the replacement mean that this variable isn't used
         # and we want to remove it
-        for r, rnew in zip(old_vars, replacements, strict=True):
+        for r, rnew in zip(old_vars, replacements, strict=False):
             if rnew is None and len(fgraph.clients[r]) > 0:
                 raise ValueError(
                     f"Node rewriter {node_rewriter} tried to remove a variable"
@@ -1949,7 +1949,7 @@ class NodeProcessingGraphRewriter(GraphRewriter):
         # the replacement
         repl_pairs = [
             (r, rnew)
-            for r, rnew in zip(old_vars, replacements, strict=True)
+            for r, rnew in zip(old_vars, replacements, strict=False)
             if rnew is not r and rnew is not None
         ]
 
