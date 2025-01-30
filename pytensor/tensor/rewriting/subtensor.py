@@ -5,7 +5,6 @@ from collections.abc import Iterable
 import numpy as np
 
 import pytensor
-import pytensor.scalar.basic as ps
 from pytensor import compile
 from pytensor.compile import optdb
 from pytensor.graph.basic import Constant, Variable
@@ -14,8 +13,11 @@ from pytensor.graph.rewriting.basic import (
     copy_stack_trace,
     in2out,
     node_rewriter,
+    out2in,
 )
 from pytensor.raise_op import Assert
+from pytensor.scalar import Add, ScalarConstant, ScalarType
+from pytensor.scalar import constant as scalar_constant
 from pytensor.tensor.basic import (
     Alloc,
     Join,
@@ -31,6 +33,7 @@ from pytensor.tensor.basic import (
     register_infer_shape,
     switch,
 )
+from pytensor.tensor.basic import constant as tensor_constant
 from pytensor.tensor.blockwise import Blockwise
 from pytensor.tensor.elemwise import Elemwise
 from pytensor.tensor.exceptions import NotScalarConstantError
@@ -625,11 +628,11 @@ def local_subtensor_remove_broadcastable_index(fgraph, node):
     remove_dim = []
     node_inputs_idx = 1
     for dim, elem in enumerate(idx):
-        if isinstance(elem, (ps.ScalarType)):
+        if isinstance(elem, ScalarType):
             # The idx is a ScalarType, ie a Type. This means the actual index
             # is contained in node.inputs[1]
             dim_index = node.inputs[node_inputs_idx]
-            if isinstance(dim_index, ps.ScalarConstant):
+            if isinstance(dim_index, ScalarConstant):
                 dim_index = dim_index.value
             if dim_index in (0, -1) and node.inputs[0].broadcastable[dim]:
                 remove_dim.append(dim)
@@ -932,7 +935,7 @@ def local_set_to_inc_subtensor(fgraph, node):
         and node.op.set_instead_of_inc
         and node.inputs[1].owner
         and isinstance(node.inputs[1].owner.op, Elemwise)
-        and isinstance(node.inputs[1].owner.op.scalar_op, ps.Add)
+        and isinstance(node.inputs[1].owner.op.scalar_op, Add)
     ):
         addn = node.inputs[1].owner
         subn = None
@@ -1826,7 +1829,6 @@ def local_join_subtensors(fgraph, node):
                 return [merged_subtensors]
 
 
-@register_specialize
 @node_rewriter(
     [
         Subtensor,
@@ -1887,12 +1889,10 @@ def local_uint_constant_indices(fgraph, node):
         if dtype == index_val.dtype:
             continue
 
-        if index_val.ndim > 0:
-            new_index = pytensor.tensor.as_tensor_variable(
-                index_val.astype(dtype), dtype=dtype
-            )
+        if isinstance(index.type, TensorType):
+            new_index = tensor_constant(index_val.astype(dtype), dtype=dtype)
         else:
-            new_index = ps.constant(index_val.astype(dtype), dtype=dtype)
+            new_index = scalar_constant(index_val.astype(dtype), dtype=dtype)
 
         new_indices[i] = new_index
         has_new_index = True
@@ -1912,6 +1912,18 @@ def local_uint_constant_indices(fgraph, node):
     new_out = op(*new_args)
     copy_stack_trace(node.outputs[0], new_out)
     return [new_out]
+
+
+compile.optdb.register(
+    local_uint_constant_indices.__name__,
+    out2in(local_uint_constant_indices),
+    "fast_run",
+    # After specialization and uncanonicalization
+    # Other rewrites don't worry about the dtype of the indices
+    # And can cause unnecessary passes of this optimization
+    # Such as x.shape[np.int(0)] -> x.shape[np.uint(0)]
+    position=4,
+)
 
 
 @register_canonicalize("shape_unsafe")
