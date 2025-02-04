@@ -813,7 +813,7 @@ def local_dot22_to_dot22scalar(fgraph, node):
     dot22_idx = i_dot22.index(True)
     d = node.inputs[dot22_idx]
     i_scalar = [_as_scalar(x, dtype=d.dtype) for x in node.inputs]
-    if not any(i_scalar):
+    if not i_scalar:
         # Check if we can reorder the graph as this mul have a mul in inputs.
         # We support only 1 additional level of mul.
         # The canonizer should have merged those mul together.

@@ -1338,7 +1338,7 @@ def local_sum_prod_of_mul_or_div(fgraph, node):
         )
         outer_term = outer_term**n_reduced_elements
 
-    if not inner_term:
+    if inner_term is None:
         # Sum/Prod is useless, just return the outer_term
         # (This can only happen for mul, not division)
         new_out = outer_term
@@ -1992,7 +1992,7 @@ def local_pow_canonicalize(fgraph, node):
         # x ** 1 = x
         new_out = broadcast_arrays(*node.inputs)[0]
 
-    if not new_out:
+    if new_out is None:
         return
 
     if new_out.dtype != node.out.dtype:
@@ -2119,7 +2119,7 @@ def local_pow_to_nested_squaring(fgraph, node):
             rval1_scal = None
             while y_to_do > 0:
                 log_to_do = int(np.log2(y_to_do))
-                if rval1:
+                if rval1 is not None:
                     rval1 *= pow2[log_to_do]
                     rval1_scal *= pow2_scal[log_to_do]
                 else:
@@ -2137,7 +2137,7 @@ def local_pow_to_nested_squaring(fgraph, node):
                 rval = [reciprocal(rval1)]
             else:
                 rval = [rval1]
-        if rval:
+        if rval is not None:
             rval[0] = cast(rval[0], odtype)
             return rval
 
