@@ -635,12 +635,23 @@ class TestRepeat(utt.InferShapeTester):
                     self.op_class,
                 )
 
-    @pytest.mark.parametrize("ndim", range(3))
-    def test_grad(self, ndim):
-        a = np.random.random((10,) * ndim).astype(config.floatX)
-
-        for axis in self._possible_axis(ndim):
-            utt.verify_grad(lambda x: Repeat(axis=axis)(x, 3), [a])
+    @pytest.mark.parametrize("x_ndim", [2, 3], ids=lambda x: f"x_ndim={x}")
+    @pytest.mark.parametrize("repeats_ndim", [0, 1], ids=lambda r: f"repeats_ndim={r}")
+    @pytest.mark.parametrize("axis", [None, 0, 1], ids=lambda a: f"axis={a}")
+    def test_grad(self, x_ndim, repeats_ndim, axis):
+        rng = np.random.default_rng(
+            [653, x_ndim, 2 if axis is None else axis, repeats_ndim]
+        )
+        x_test = rng.normal(size=np.arange(3, 3 + x_ndim))
+        if repeats_ndim == 0:
+            repeats_size = ()
+        else:
+            repeats_size = (x_test.shape[axis] if axis is not None else x_test.size,)
+        repeats = rng.integers(1, 6, size=repeats_size)
+        utt.verify_grad(
+            lambda x: Repeat(axis=axis)(x, repeats),
+            [x_test],
+        )
 
     def test_broadcastable(self):
         x = TensorType(config.floatX, shape=(None, 1, None))()
