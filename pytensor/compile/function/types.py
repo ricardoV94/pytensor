@@ -168,6 +168,38 @@ class Supervisor(Feature):
                 raise InconsistencyError(f"Trying to destroy a protected variable: {r}")
 
 
+def add_supervisor_to_fgraph(
+    fgraph: FunctionGraph, input_specs, accept_inplace: bool = False
+) -> None:
+    """Setup Supervisor Feature in a FunctionGraph, so that inplace rewrites can be used."""
+
+    has_destroy_handler = hasattr(fgraph, "destroyers")
+    if not (has_destroy_handler and accept_inplace):
+        # Check if fgraph already contains destructive operations,
+        # in which case we need to add a DestroyHandler or raise an error
+        for node in fgraph.apply_nodes:
+            if node.op.destroy_map:
+                if not accept_inplace:
+                    raise TypeError(
+                        f"Graph must not contain inplace operations: {node}"
+                    )
+                else:
+                    has_destroy_handler = True
+                    fgraph.attach_feature(DestroyHandler())
+                    break
+
+    # Protect all immutable inputs from inplace operations.
+    fgraph.attach_feature(
+        Supervisor(
+            input
+            for spec, input in zip(input_specs, fgraph.inputs, strict=True)
+            if not (
+                spec.mutable or has_destroy_handler and fgraph.has_destroyers([input])
+            )
+        )
+    )
+
+
 def std_fgraph(
     input_specs: list[SymbolicInput],
     output_specs: list[SymbolicOutput],
@@ -229,24 +261,8 @@ def std_fgraph(
 
         found_updates.extend(map(SymbolicOutput, updates))
 
-    for node in fgraph.apply_nodes:
-        if node.op.destroy_map:
-            if not accept_inplace:
-                raise TypeError(f"Graph must not contain inplace operations: {node}")
-            else:
-                fgraph.attach_feature(DestroyHandler())
-                break
-
-    # We need to protect all immutable inputs from inplace operations.
-    fgraph.attach_feature(
-        Supervisor(
-            input
-            for spec, input in zip(input_specs, fgraph.inputs, strict=True)
-            if not (
-                spec.mutable
-                or (hasattr(fgraph, "destroyers") and fgraph.has_destroyers([input]))
-            )
-        )
+    add_supervisor_to_fgraph(
+        fgraph=fgraph, input_specs=input_specs, accept_inplace=accept_inplace
     )
 
     # If named nodes are replaced, keep the name
