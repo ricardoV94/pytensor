@@ -6,7 +6,7 @@ import pytest
 import pytensor
 import pytensor.scalar as ps
 import pytensor.tensor as pt
-from pytensor import graph_replace, shared
+from pytensor import OpFromGraph, graph_replace, shared
 from pytensor.compile import optdb
 from pytensor.compile.function import function
 from pytensor.compile.mode import get_default_mode, get_mode
@@ -21,6 +21,7 @@ from pytensor.graph.rewriting.utils import rewrite_graph
 from pytensor.printing import debugprint, pprint
 from pytensor.raise_op import Assert, CheckAndRaise
 from pytensor.scalar import Composite, float64
+from pytensor.tensor import TensorConstant
 from pytensor.tensor.basic import (
     Alloc,
     Join,
@@ -831,6 +832,29 @@ class TestConstantFolding:
         topo_unconditional_constant_folding.apply(fg)
         assert not isinstance(fg.outputs[0], Constant)
         assert isinstance(fg.outputs[0].owner.op, OpNoPerform)
+
+    def test_inner_graph_op_not_modified(self):
+        x = pt.scalar("x")
+        ofg = OpFromGraph([x], [x + 1])
+
+        one = pt.constant(np.array(1.0, dtype=x.type.dtype))
+        y = ofg(one)
+        z = ofg(x)
+        fg = FunctionGraph(outputs=[y, z])
+        assert fg.outputs[0].owner.op is ofg
+        assert fg.outputs[1].owner.op is ofg
+        assert not hasattr(ofg, "_fn")
+
+        # Constant folding should work on the first output,
+        # but it should not trigger the compilation of the function
+        # that will be used by the second output
+        topo_constant_folding(fg)
+        assert isinstance(fg.outputs[0], TensorConstant) and fg.outputs[0].data == 2.0
+        assert not hasattr(ofg, "_fn")
+
+        # Only now does the inner function get compiled
+        fg.outputs[1].owner.op.fn
+        assert hasattr(ofg, "fn")
 
 
 class TestLocalSwitchSink:

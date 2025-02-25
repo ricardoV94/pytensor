@@ -31,6 +31,7 @@ from pytensor import compile, config
 from pytensor.compile.ops import ViewOp
 from pytensor.graph import FunctionGraph
 from pytensor.graph.basic import Constant
+from pytensor.graph.op import HasInnerGraph
 from pytensor.graph.rewriting.basic import (
     NodeProcessingGraphRewriter,
     NodeRewriter,
@@ -1113,14 +1114,25 @@ def unconditional_constant_folding(fgraph, node):
     if not all(isinstance(inp, Constant) for inp in node.inputs):
         return False
 
+    op = node.op
+    inner_graph_op = isinstance(op, HasInnerGraph)
+    if inner_graph_op:
+        # We want to clone the Op so that we can execute in a fast compilation mode
+        # But we don't want to cause the Op to use that mode if it will be used in other nodes
+        node = node.clone(clone_inner_graph=True)
+        op = node.op
+
     storage_map = {i: [i.data] for i in node.inputs}
     compute_map = {i: [True] for i in node.inputs}
     for o in node.outputs:
         storage_map[o] = [None]
         compute_map[o] = [False]
 
-    thunk = node.op.make_thunk(node, storage_map, compute_map, no_recycling=[])
-    required = thunk()
+    if inner_graph_op:
+        with config.change_flags(mode="FAST_COMPILE"):
+            required = op.make_thunk(node, storage_map, compute_map, no_recycling=[])()
+    else:
+        required = op.make_thunk(node, storage_map, compute_map, no_recycling=[])()
 
     # A node whose inputs are all provided should always return successfully
     assert not required
@@ -1143,14 +1155,7 @@ def unconditional_constant_folding(fgraph, node):
             output_type = output.type
 
         v = output_type.make_constant(data)
-
-        # We need to "narrow" types when we have additional information,
-        # and not "broaden" them.  This is a case in which types are
-        # unnecessarily "broadened"
-        # assert not hasattr(output.type, "broadcastable") or output.type.broadcastable == tuple(s == 1 for s in data.shape)
-
         copy_stack_trace(output, v)
-
         rval.append(v)
 
     return rval
