@@ -15,7 +15,6 @@ from pytensor.graph.rewriting.basic import (
     in2out,
     node_rewriter,
 )
-from pytensor.raise_op import Assert
 from pytensor.tensor.basic import (
     Alloc,
     Join,
@@ -47,10 +46,8 @@ from pytensor.tensor.math import (
     lt,
     maximum,
     minimum,
-    or_,
     variadic_add,
 )
-from pytensor.tensor.math import all as pt_all
 from pytensor.tensor.rewriting.basic import (
     register_canonicalize,
     register_specialize,
@@ -60,7 +57,6 @@ from pytensor.tensor.shape import (
     Shape,
     SpecifyShape,
     Unbroadcast,
-    shape_padleft,
     shape_tuple,
     specify_shape,
     unbroadcast,
@@ -74,7 +70,6 @@ from pytensor.tensor.subtensor import (
     IncSubtensor,
     Subtensor,
     advanced_inc_subtensor1,
-    advanced_subtensor,
     advanced_subtensor1,
     as_index_constant,
     as_index_literal,
@@ -1456,81 +1451,58 @@ def local_setsubtensor_of_constants(fgraph, node):
             return False
 
 
-@register_canonicalize
-@register_specialize
+@register_canonicalize("shape_unsafe")
+@register_specialize("shape_unsafe")
 @node_rewriter([AdvancedSubtensor1])
 def local_adv_sub1_adv_inc_sub1(fgraph, node):
-    """Rewrite graphs like ``AdvancedSubtensor1(AdvancedSetSubtensor1(...), ...)``.
+    """Rewrite ``AdvancedSubtensor1(AdvancedSetSubtensor1(x, y, idx), idx) -> y``."""
+    inp, outer_idx = node.inputs
+    inp_node = inp.owner
 
-    .. code::
+    if not (inp_node and isinstance(inp_node.op, AdvancedIncSubtensor1)):
+        return None
 
-        AdvancedSubtensor1(AdvancedSetSubtensor1(x, y, idx), idx) -> y
+    outer_idx = node.inputs[1]
+    x, y, inner_idx = inp.owner.inputs
 
+    if outer_idx is not inner_idx:
+        return None
 
-    Notes
-    -----
-    This rewrite adds an `AssertOp`; otherwise, it would remove shape and index
-    error. If you want to get rid of them, see the :ref:`unsafe_rewrites`
-    section.
+    if not inp_node.op.set_instead_of_inc:
+        # Inc-ing on zeros without repeated indices is the same as Set-ing on zeros, so we can support those cases
+        if not (
+            inner_idx.type.shape != (1,)
+            or (
+                isinstance(inner_idx, Constant)
+                and np.unique(inner_idx.data).size != inner_idx.data.size
+            )
+        ):
+            # More than one entry and not constant / unique, we can't be sure there are no duplicate indices
+            return None
 
-    A previous version of this rewrite also matched
-    ``AdvancedSubtensor1(AdvancedIncSubtensor1(x, y, idx), idx)``.
-    This is incorrect when there are duplicate indices.
-    The current version warns the user about potential issues.
+        if (
+            get_underlying_scalar_constant_value(
+                x, elemwise=False, raise_not_constant=False
+            )
+            != 0
+        ):
+            # Not certainly Inc-ing on zeros
+            return None
 
-    """
-    if not isinstance(node.op, AdvancedSubtensor1):
-        return
-    inp = node.inputs[0]
-    if not (inp.owner and isinstance(inp.owner.op, AdvancedIncSubtensor1)):
-        return
-    idx = node.inputs[1]
-    idx2 = inp.owner.inputs[2]
-    x = inp.owner.inputs[0]
-    y = inp.owner.inputs[1]
-    if idx is not idx2:
-        return
-    if (
-        not inp.owner.op.set_instead_of_inc
-        and
-        # Don't use only_process_constants=True. We need to
-        # investigate Alloc of 0s but with non constant shape.
-        get_underlying_scalar_constant_value(
-            x, elemwise=False, raise_not_constant=False
-        )
-        != 0
-    ):
-        return
+    [old_out] = node.outputs
+    if y.dtype != old_out.dtype:
+        # It is possible that y is upcast or downcast to x.dtype.
+        # In all case, as we set or add with 0, we can just cast y.
+        y = cast(y, old_out.dtype)
 
-    if not inp.owner.op.set_instead_of_inc:
-        return
-
-    cond = [pt_all(and_(lt(idx, x.shape[0]), ge(idx, -x.shape[0])))]
-    if not fgraph.shape_feature.same_shape(idx, y, 0, 0):
-        cond.append(eq(idx.shape[0], y.shape[0]))
-    r = Assert(
-        "Bad indexing or shapes in a AdvancedIncSubtensor1 that was optimized away"
-    )(y, *cond)
-    copy_stack_trace(y, r)
-
-    if r.dtype == node.outputs[0].dtype:
-        return [r]
-    # It is possible that y is upcast or downcast to x.dtype.
-    # In all case, as we set or add with 0, we can just cast y.
-    r2 = cast(r, node.outputs[0].dtype)
-
-    # Copy over stacktrace from before casting, since
-    # we don't expect problems in the casting operation,
-    # and any problems in the indexing would have been spotted above.
-    copy_stack_trace(r, r2)
-    return [r2]
+    copy_stack_trace(old_out, y)
+    return [old_out]
 
 
-@register_infer_shape
-@register_specialize
-@register_stabilize
-@register_canonicalize
-@register_useless
+@register_specialize("shape_unsafe")
+@register_stabilize("shape_unsafe")
+@register_canonicalize("shape_unsafe")
+@register_useless("shape_unsafe")
 @node_rewriter([IncSubtensor, AdvancedIncSubtensor, AdvancedIncSubtensor1])
 def local_useless_inc_subtensor_alloc(fgraph, node):
     """
@@ -1539,100 +1511,23 @@ def local_useless_inc_subtensor_alloc(fgraph, node):
     intermediate `alloc` where possible.
 
     """
-    if isinstance(node.op, IncSubtensor | AdvancedIncSubtensor | AdvancedIncSubtensor1):
-        x = node.inputs[0]
-        y = node.inputs[1]
-        i = node.inputs[2:]
+    x, y, *idxs = node.inputs
 
-        if y.owner is not None and isinstance(y.owner.op, Alloc):
-            # `z` is the input of the Alloc op, i.e. at.alloc(z, <shape>)
-            z = y.owner.inputs[0]
+    if not (y.owner is not None and isinstance(y.owner.op, Alloc)):
+        return None
 
-            try:
-                shape_feature = fgraph.shape_feature
-            except AttributeError:
-                # The shape feature may not be available in some mode, but we
-                # need it for this optimization, so don't continue.
-                return False
+    # `z` is the input of the Alloc op, i.e. at.alloc(z, <shape>)
+    z = y.owner.inputs[0]
 
-            shape_of = shape_feature.shape_of
-            same_shape = shape_feature.same_shape
+    r = node.op(x, z, *idxs)
 
-            # Get the subtensor of `x` indexed by `i` in order to compare
-            # shapes later.
-            if isinstance(node.op, IncSubtensor):
-                xi = Subtensor(node.op.idx_list)(x, *i)
-            elif isinstance(node.op, AdvancedIncSubtensor):
-                xi = advanced_subtensor(x, *i)
-            elif isinstance(node.op, AdvancedIncSubtensor1):
-                xi = advanced_subtensor1(x, *i)
-            else:
-                raise Exception("Should never happen!")
+    # Copy over stacktrace from previous output, since
+    # we don't expect problems when removing the intermediate
+    # alloc operation and so we still want to point at the line
+    # of the inc_subtensor operation.
+    copy_stack_trace(node.outputs, r)
 
-            reason = "local_useless_incsubtensor_alloc"
-
-            # Add `xi` to the shape feature `fgraph`. This is important for
-            # shape inference later because the variable must be part of the
-            # function graph in order to call `same_shape` on it.
-            if xi not in shape_of:
-                shape_feature.on_import(fgraph, xi.owner, f"{reason}: add `xi`")
-
-            # `xi` may have more dimensions than `y` since the subtensor ops
-            # do automatic broadcasting of the increment internally. Thus, we
-            # need to make the leading implicitly broadcasted dimensions
-            # explicit for shape comparison later.
-            if xi.ndim > y.ndim:
-                y = shape_padleft(y, xi.ndim - y.ndim)
-                if y not in shape_of:
-                    shape_feature.on_import(fgraph, y.owner, f"{reason}: add `y`")
-
-            # Build `z_broad` explicitly to include extra implicit dimensions.
-            z_broad = (True,) * (xi.ndim - z.ndim) + z.broadcastable
-
-            cond = [
-                # The shapes of `y` and `xi` must either agree or `y` may
-                # also have shape equal to 1 which may be treated as a
-                # broadcastable dimension by the subtensor op.
-                or_(eq(y.shape[k], 1), eq(y.shape[k], xi.shape[k]))
-                # Loop over all dimensions.
-                for k in range(xi.ndim)
-                # We need to check the above shapes, if
-                # * the pre-alloc increment `z` is broadcastable in
-                # dimension `k` (if it isn't, then the shapes of `z` and
-                # `y` are the same by the definition of the `Alloc` op in
-                # this dimension and replacing `y` by `z` will not hide a
-                # shape error), and
-                # * `xi` and `y` do not have the same shape in dimension
-                # `k` or we cannot infer the shape statically (if the
-                # shapes of `xi` and `y` are not the same, then replacing
-                # `y` by `z` will hide the shape error of `y`), and
-                # * the shape of `y` is not equal to 1 or we cannot infer
-                # the shape statically (if the shape of `y` is equal to
-                # 1, then `y` is broadcasted by the inc_subtensor op
-                # internally, so the shapes of `xi` and `y` do not need
-                # to match in dimension `k`; else we need to check at
-                # runtime that the shape of `y` is either 1 or the same
-                # as `xi` or otherwise replacing `y` by `z` will hide a
-                # shape error).
-                if (
-                    z_broad[k]
-                    and not same_shape(xi, y, dim_x=k, dim_y=k)
-                    and shape_of[y][k] != 1
-                )
-            ]
-
-            if len(cond) > 0:
-                msg = "`x[i]` and `y` do not have the same shape."
-                z = Assert(msg)(z, *cond)
-
-            r = node.op(x, z, *i)
-            # Copy over stacktrace from previous output, since
-            # we don't expect problems when removing the intermediate
-            # alloc operation and so we still want to point at the line
-            # of the inc_subtensor operation.
-            copy_stack_trace(node.outputs, r)
-
-            return [r]
+    return [r]
 
 
 @register_specialize
