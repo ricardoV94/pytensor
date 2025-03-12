@@ -15,7 +15,6 @@ from pytensor.graph.rewriting.basic import check_stack_trace
 from pytensor.graph.rewriting.db import RewriteDatabaseQuery
 from pytensor.graph.rewriting.utils import rewrite_graph
 from pytensor.graph.type import Type
-from pytensor.raise_op import Assert
 from pytensor.tensor import inplace
 from pytensor.tensor.basic import Alloc, MakeVector, _convert_to_int8, make_vector
 from pytensor.tensor.blockwise import Blockwise
@@ -1477,12 +1476,12 @@ class TestLocalSubtensorMerge:
 class TestLocalAdvSub1AdvIncSub1:
     def setup_method(self):
         mode = get_default_mode()
-        self.mode = mode.including(
+        self.mode_no_assert = mode.including(
             "local_replace_AdvancedSubtensor",
             "local_AdvancedIncSubtensor_to_AdvancedIncSubtensor1",
             "local_adv_sub1_adv_inc_sub1",
         ).excluding("fusion")
-        self.mode_no_assert = self.mode.including("local_remove_all_assert")
+        self.mode = self.mode_no_assert.excluding("shape_unsafe")
 
     def test_basic(self):
         for dtype1, dtype2 in [
@@ -1525,7 +1524,7 @@ class TestLocalAdvSub1AdvIncSub1:
             np.add.at(_dx, didx, dy)
             utt.assert_allclose(_dx[didx], res)
             topo = f.maker.fgraph.toposort()
-            len(topo) == 2
+            assert len(topo) == 2
 
             # inc_subtensor(0[idx], y)
             inc = inc_subtensor(x.zeros_like()[idx], y)
@@ -1533,7 +1532,7 @@ class TestLocalAdvSub1AdvIncSub1:
             f = function([x, y, idx], o, self.mode_no_assert)
 
             res = f(dx, dy, didx)
-            utt.assert_allclose(np.vstack([dy[0], 2 * dy[1], 2 * dy[2]]), res)
+            np.testing.assert_allclose(np.vstack([dy[0], 2 * dy[1], 2 * dy[2]]), res)
 
     def test_assert(self):
         x = matrix("x")
@@ -1549,28 +1548,52 @@ class TestLocalAdvSub1AdvIncSub1:
         f = function([x, y, idx], o, self.mode)
         # test wrong index
         for i in [dx.shape[0], -dx.shape[0] - 1]:
-            with pytest.raises((AssertionError, IndexError)):
+            with pytest.raises((AssertionError, IndexError, ValueError)):
                 f(dx, dy, [i, i])
         # test wrong shape
-        with pytest.raises((AssertionError, IndexError)):
+        with pytest.raises((AssertionError, IndexError, ValueError)):
             f(dx, dy, [1])
 
-    def test_stack_trace(self):
-        x = matrix("x")
-        # test cases with y.dtype
-        # - equal to x.dtype
-        # - different from x.dtype (to trigger the cast in
-        #   local_adv_sub1_adv_inc_sub1)
-        ys = [matrix("y"), dmatrix("y")]
-        idx = ivector()
+    def test_inc_zeros_unique_indices(self):
+        zeros = pt.zeros(10)
+        y = scalar("y")
+        y1 = y[None]
+        y_vec = vector("y_vec")
+        idx1 = vector("idx1", shape=(1,), dtype="int")
+        idx_vec = vector("idx_vec", shape=(None,), dtype="int")
 
-        # set_subtensor and then subtensor with both ys
-        incs = [set_subtensor(x[idx], y) for y in ys]
-        outs = [inc[idx] for inc in incs]
+        # grah is equivalent to y1
+        out = zeros[idx1].inc(y1)[idx1]
+        new_out = rewrite_graph(out, include=("specialize",))
+        assert new_out is y1
 
-        for y, out in zip(ys, outs, strict=True):
-            f = function([x, y, idx], out, self.mode)
-            assert check_stack_trace(f, ops_to_check=(Assert, ps.Cast))
+        # y needs an expand_dims
+        out = zeros[idx1].inc(y)[idx1]
+        new_out = rewrite_graph(out, include=("specialize",))
+        assert equal_computations([new_out], [y1])
+
+        # constant non repeated indices
+        constant_idx = pt.as_tensor(np.array([1, 2, 3]))
+        out = zeros[constant_idx].inc(y_vec)[constant_idx]
+        with config.change_flags(optimizer_verbose=True):
+            new_out = rewrite_graph(out, include=("specialize",))
+        assert new_out is y_vec
+
+        # not supported: repeated indices
+        constant_repeated_idxs = pt.as_tensor(np.array([1, 1, 0]))
+        out = zeros[constant_repeated_idxs].inc(y_vec)[constant_repeated_idxs]
+        new_out = rewrite_graph(out, include=("specialize",))
+        assert new_out is out
+
+        # not supported: potentially repeated indices
+        out = zeros[idx_vec].inc(y_vec)[idx_vec]
+        new_out = rewrite_graph(out, include=("specialize",))
+        assert new_out is out
+
+        # not supported: y would need to be broadcast
+        out = zeros[constant_idx].inc(y1)[constant_idx]
+        new_out = rewrite_graph(out, include=("specialize",))
+        assert new_out is out
 
 
 class TestSubtensorAllocRewrites:

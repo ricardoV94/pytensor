@@ -23,6 +23,7 @@ from pytensor.tensor.basic import (
     TensorFromScalar,
     alloc,
     as_tensor,
+    atleast_Nd,
     cast,
     concatenate,
     get_scalar_constant_value,
@@ -49,6 +50,7 @@ from pytensor.tensor.math import (
     variadic_add,
 )
 from pytensor.tensor.rewriting.basic import (
+    broadcasted_by,
     register_canonicalize,
     register_specialize,
     register_stabilize,
@@ -1462,16 +1464,23 @@ def local_adv_sub1_adv_inc_sub1(fgraph, node):
     if not (inp_node and isinstance(inp_node.op, AdvancedIncSubtensor1)):
         return None
 
-    outer_idx = node.inputs[1]
     x, y, inner_idx = inp.owner.inputs
 
     if outer_idx is not inner_idx:
         return None
 
+    [old_out] = node.outputs
+    if y.type.ndim != old_out.type.ndim:
+        y = atleast_Nd(y, n=old_out.type.ndim)
+
+    if broadcasted_by(y, old_out):
+        # The original y value is being broadcast
+        return None
+
     if not inp_node.op.set_instead_of_inc:
         # Inc-ing on zeros without repeated indices is the same as Set-ing on zeros, so we can support those cases
         if not (
-            inner_idx.type.shape != (1,)
+            inner_idx.type.shape == (1,)
             or (
                 isinstance(inner_idx, Constant)
                 and np.unique(inner_idx.data).size != inner_idx.data.size
@@ -1489,14 +1498,13 @@ def local_adv_sub1_adv_inc_sub1(fgraph, node):
             # Not certainly Inc-ing on zeros
             return None
 
-    [old_out] = node.outputs
     if y.dtype != old_out.dtype:
         # It is possible that y is upcast or downcast to x.dtype.
         # In all case, as we set or add with 0, we can just cast y.
         y = cast(y, old_out.dtype)
 
     copy_stack_trace(old_out, y)
-    return [old_out]
+    return [y]
 
 
 @register_specialize("shape_unsafe")
