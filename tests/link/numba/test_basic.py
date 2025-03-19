@@ -261,7 +261,7 @@ def compare_numba_and_py(
                 x, y
             )
 
-    if any(inp.owner is not None for inp in graph_inputs):
+    if any(isinstance(inp, Variable) and inp.owner is not None for inp in graph_inputs):
         raise ValueError("Inputs must be root variables")
 
     pytensor_py_fn = function(

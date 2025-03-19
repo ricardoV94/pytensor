@@ -27,6 +27,12 @@ from pytensor.tensor.slinalg import (
 
 
 @numba_basic.numba_njit(inline="always")
+def _copy_to_fortran_order_even_if_1d(x):
+    # Numba's _copy_to_fortran_order doesn't do anything for vectors
+    return x.copy() if x.ndim == 1 else _copy_to_fortran_order(x)
+
+
+@numba_basic.numba_njit(inline="always")
 def _solve_check(n, info, lamch=False, rcond=None):
     """
     Check arguments during the different steps of the solution phase
@@ -497,10 +503,10 @@ def getrf_impl(
     ) -> tuple[np.ndarray, np.ndarray, int]:
         _M, _N = np.int32(A.shape[-2:])  # type: ignore
 
-        if not overwrite_a:
-            A_copy = _copy_to_fortran_order(A)
-        else:
+        if overwrite_a and A.flags.f_contiguous:
             A_copy = A
+        else:
+            A_copy = _copy_to_fortran_order(A)
 
         M = val_to_int_ptr(_M)  # type: ignore
         N = val_to_int_ptr(_N)  # type: ignore
@@ -545,13 +551,14 @@ def getrs_impl(
 
         B_is_1d = B.ndim == 1
 
-        if not overwrite_b:
-            B_copy = _copy_to_fortran_order(B)
-        else:
+        if overwrite_b and B.flags.f_contiguous:
             B_copy = B
+        else:
+            B_copy = _copy_to_fortran_order_even_if_1d(B)
 
         if B_is_1d:
             B_copy = np.expand_dims(B_copy, -1)
+            assert B_copy.flags.f_contiguous
 
         NRHS = 1 if B_is_1d else int(B_copy.shape[-1])
 
@@ -681,19 +688,22 @@ def sysv_impl(
         _LDA, _N = np.int32(A.shape[-2:])  # type: ignore
         _solve_check_input_shapes(A, B)
 
-        if not overwrite_a:
-            A_copy = _copy_to_fortran_order(A)
-        else:
+        if overwrite_a and (A.flags.f_contiguous or A.flags.c_contiguous):
+            # A symmetric c_contiguous is the same as a symmetric f_contiguous
             A_copy = A
+        else:
+            A_copy = _copy_to_fortran_order(A)
 
         B_is_1d = B.ndim == 1
 
-        if not overwrite_b:
-            B_copy = _copy_to_fortran_order(B)
-        else:
+        if overwrite_b and B.flags.f_contiguous:
             B_copy = B
+        else:
+            B_copy = _copy_to_fortran_order_even_if_1d(B)
+
         if B_is_1d:
-            B_copy = np.asfortranarray(np.expand_dims(B_copy, -1))
+            B_copy = np.expand_dims(B_copy, -1)
+            assert B_copy.flags.f_contiguous
 
         NRHS = 1 if B_is_1d else int(B.shape[-1])
 
@@ -864,7 +874,7 @@ def _posv(
     overwrite_b: bool,
     check_finite: bool,
     transposed: bool,
-) -> tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     """
     Placeholder for solving a linear system with a positive-definite matrix; used by linalg.solve.
     """
@@ -881,7 +891,8 @@ def posv_impl(
     check_finite: bool,
     transposed: bool,
 ) -> Callable[
-    [np.ndarray, np.ndarray, bool, bool, bool, bool, bool], tuple[np.ndarray, int]
+    [np.ndarray, np.ndarray, bool, bool, bool, bool, bool],
+    tuple[np.ndarray, np.ndarray, int],
 ]:
     ensure_lapack()
     _check_scipy_linalg_matrix(A, "solve")
@@ -903,17 +914,23 @@ def posv_impl(
 
         _N = np.int32(A.shape[-1])
 
-        if not overwrite_a:
-            A_copy = _copy_to_fortran_order(A)
+        if overwrite_a:
+            if A.flags.c_contiguous:
+                # A lower c_contiguous is the same as an upper f_contiguous
+                # And an upper c_contiguous is the same as a lower f_contiguous
+                A_copy = A
+                lower = not lower
+            elif not A.flags.f_contiguous:
+                A_copy = _copy_to_fortran_order(A)
         else:
-            A_copy = A
+            A_copy = _copy_to_fortran_order(A)
 
         B_is_1d = B.ndim == 1
 
-        if not overwrite_b:
-            B_copy = _copy_to_fortran_order(B)
-        else:
+        if overwrite_b and B.flags.f_contiguous:
             B_copy = B
+        else:
+            B_copy = _copy_to_fortran_order_even_if_1d(B)
 
         if B_is_1d:
             B_copy = np.expand_dims(B_copy, -1)
@@ -939,8 +956,9 @@ def posv_impl(
         )
 
         if B_is_1d:
-            return B_copy[..., 0], int_ptr_to_val(INFO)
-        return B_copy, int_ptr_to_val(INFO)
+            B_copy = B_copy[..., 0]
+
+        return A_copy, B_copy, int_ptr_to_val(INFO)
 
     return impl
 
@@ -1041,10 +1059,12 @@ def solve_psd_impl(
     ) -> np.ndarray:
         _solve_check_input_shapes(A, B)
 
-        x, info = _posv(A, B, lower, overwrite_a, overwrite_b, check_finite, transposed)
+        lu, x, info = _posv(
+            A, B, lower, overwrite_a, overwrite_b, check_finite, transposed
+        )
         _solve_check(A.shape[-1], info)
 
-        rcond, info = _pocon(x, _xlange(A))
+        rcond, info = _pocon(lu, _xlange(A))
         _solve_check(A.shape[-1], info=info, lamch=True, rcond=rcond)
 
         return x

@@ -8,8 +8,9 @@ from numpy.testing import assert_allclose
 
 import pytensor
 import pytensor.tensor as pt
-from pytensor import config
-from pytensor.tensor.slinalg import SolveTriangular
+from pytensor import In, config
+from pytensor.tensor import TensorVariable
+from pytensor.tensor.slinalg import Solve, SolveTriangular
 from tests import unittest_tools as utt
 from tests.link.numba.test_basic import compare_numba_and_py
 
@@ -408,66 +409,109 @@ def test_getrs(trans, overwrite_a, overwrite_b, b_shape):
 @pytest.mark.filterwarnings(
     'ignore:Cannot cache compiled function "numba_funcified_fgraph"'
 )
-def test_solve(b_shape: tuple[int], assume_a: Literal["gen", "sym", "pos"]):
-    A = pt.matrix("A", dtype=floatX)
-    b = pt.tensor("b", shape=b_shape, dtype=floatX)
-
-    A_val = np.asfortranarray(np.random.normal(size=(5, 5)).astype(floatX))
-    b_val = np.asfortranarray(np.random.normal(size=b_shape).astype(floatX))
-
+@pytest.mark.parametrize(
+    "overwrite_a, overwrite_b",
+    [(False, False), (True, False), (False, True)][::2],
+    ids=["no_overwrite", "overwrite_a", "overwrite_b"][::2],
+)
+def test_solve(
+    b_shape: tuple[int],
+    assume_a: Literal["gen", "sym", "pos"],
+    overwrite_a: bool,
+    overwrite_b: bool,
+):
     def A_func(x):
         if assume_a == "pos":
             x = x @ x.T
         elif assume_a == "sym":
             x = (x + x.T) / 2
+        elif assume_a == "tridiagonal":
+            lib = pt if isinstance(x, TensorVariable) else np
+            diag_fn = getattr(lib, "diag")
+            eye_fn = getattr(lib, "eye")
+            concatenate_fn = getattr(lib, "concatenate")
+
+            ud = diag_fn(x, 1)
+            ld = diag_fn(x, -1)
+            # Set ud and ld to zeros
+            d = (x - diag_fn(ud, 1) - diag_fn(ld, -1)).sum(0)
+            return x * (
+                eye_fn(x.shape[1], k=0) * d
+                + eye_fn(x.shape[1], k=-1) * concatenate_fn([[0], ld], axis=-1)
+                + eye_fn(x.shape[1], k=1) * concatenate_fn([ud, [0]], axis=-1)
+            )
         return x
 
+    A = pt.matrix("A", dtype=floatX)
+    b = pt.tensor("b", shape=b_shape, dtype=floatX)
+
+    rng = np.random.default_rng(418)
+    A_val = np.asfortranarray(A_func(rng.normal(size=(5, 5))).astype(floatX))
+    b_val = np.asfortranarray(rng.normal(size=b_shape).astype(floatX))
+
     X = pt.linalg.solve(
-        A_func(A),
+        A,
         b,
         assume_a=assume_a,
         b_ndim=len(b_shape),
     )
-    f = pytensor.function(
-        [pytensor.In(A, mutable=True), pytensor.In(b, mutable=True)], X, mode="NUMBA"
+
+    f, res = compare_numba_and_py(
+        [In(A, mutable=overwrite_a), In(b, mutable=overwrite_b)],
+        X,
+        test_inputs=[A_val, b_val],
+        inplace=True,
+        numba_mode="NUMBA",  # Default numba mode inplace rewrites get triggered
     )
+    f.dprint(print_memory_map=True)
+
     op = f.maker.fgraph.outputs[0].owner.op
+    assert isinstance(op, Solve)
+    destroy_map = op.destroy_map
+    if overwrite_a and overwrite_b:
+        raise NotImplementedError(
+            "Test not implemented for symultaneous overwrite_a and overwrite_b, as that's not currently supported by PyTensor"
+        )
+    elif overwrite_a:
+        assert destroy_map == {0: [0]}
+    elif overwrite_b:
+        assert destroy_map == {0: [1]}
+    else:
+        assert destroy_map == {}
 
-    compare_numba_and_py([A, b], [X], test_inputs=[A_val, b_val], inplace=True)
+    # Test inputs are destroyed if possible
+    A_val_f_contig = np.copy(A_val, order="F")
+    b_val_f_contig = np.copy(b_val, order="F")
+    res_f_contig = f(A_val_f_contig, b_val_f_contig)
+    np.testing.assert_allclose(res_f_contig, res)
+    assert (A_val == A_val_f_contig).all() == (op.destroy_map.get(0, None) != [0])
+    assert (b_val == b_val_f_contig).all() == (op.destroy_map.get(0, None) != [1])
 
-    # Calling this is destructive and will rewrite b_val to be the answer. Store copies of the inputs first.
-    A_val_copy = A_val.copy()
-    b_val_copy = b_val.copy()
+    # Test right results even if input cannot be destroyed because it is not F-contiguous
+    A_val_c_contig = np.copy(A_val, order="C")
+    b_val_c_contig = np.copy(b_val, order="C")
+    res_c_contig = f(A_val_c_contig, b_val_c_contig)
+    np.testing.assert_allclose(res_c_contig, res)
+    if assume_a == "sym" and overwrite_a:
+        # We can actually destroy either C or F-contiguous arrays, since they are equivalent
+        assert not np.allclose(A_val_c_contig, A_val)
+    else:
+        np.testing.assert_allclose(A_val_c_contig, A_val)
+    np.testing.assert_allclose(b_val_c_contig, b_val)
 
-    X_np = f(A_val, b_val)
-
-    # overwrite_b is preferred when both inputs can be destroyed
-    assert op.destroy_map == {0: [1]}
-
-    # Confirm inputs were destroyed by checking against the copies
-    assert (A_val == A_val_copy).all() == (op.destroy_map.get(0, None) != [0])
-    assert (b_val == b_val_copy).all() == (op.destroy_map.get(0, None) != [1])
-
-    ATOL = 1e-8 if floatX.endswith("64") else 1e-4
-    RTOL = 1e-8 if floatX.endswith("64") else 1e-4
-
-    # Confirm b_val is used to store to solution
-    np.testing.assert_allclose(X_np, b_val, atol=ATOL, rtol=RTOL)
-    assert not np.allclose(b_val, b_val_copy)
-
-    # Test that the result is numerically correct. Need to use the unmodified copy
-    np.testing.assert_allclose(
-        A_func(A_val_copy) @ X_np, b_val_copy, atol=ATOL, rtol=RTOL
+    # Test right results if inputs are not contiguous in either format
+    A_val_not_contig = np.repeat(A_val, 2, axis=0)[::2]
+    assert not (
+        A_val_not_contig.flags.c_contiguous or A_val_not_contig.flags.f_contiguous
     )
-
-    # See the note in tensor/test_slinalg.py::test_solve_correctness for details about the setup here
-    utt.verify_grad(
-        lambda A, b: pt.linalg.solve(
-            A_func(A), b, lower=False, assume_a=assume_a, b_ndim=len(b_shape)
-        ),
-        [A_val_copy, b_val_copy],
-        mode="NUMBA",
+    b_val_not_contig = np.repeat(b_val, 2, axis=0)[::2]
+    assert not (
+        b_val_not_contig.flags.c_contiguous or b_val_not_contig.flags.f_contiguous
     )
+    res_not_contig = f(A_val_not_contig, b_val_not_contig)
+    np.testing.assert_allclose(res_not_contig, res)
+    np.testing.assert_allclose(A_val_not_contig, A_val)
+    np.testing.assert_allclose(b_val_not_contig, b_val)
 
 
 @pytest.mark.parametrize(
