@@ -52,7 +52,7 @@ from pytensor.tensor.math import (
     or_,
     variadic_add,
 )
-from pytensor.tensor.math import all as pt_all
+from pytensor.tensor.math import all as pt_all, abs as pt_abs
 from pytensor.tensor.rewriting.basic import (
     register_canonicalize,
     register_specialize,
@@ -61,13 +61,14 @@ from pytensor.tensor.rewriting.basic import (
 from pytensor.tensor.rewriting.extremum import (
     local_extremum_plus_x,
     local_flatten_extremum,
-    local_useless_extremum_branches,
+    local_useless_extremum_branches, _estimate_lower_bound, _estimate_upper_bound,
 )
 from pytensor.tensor.rewriting.math import (
     local_add_canonizer,
     local_intdiv_by_one,
     local_mul_canonizer,
 )
+from pytensor.tensor.rewriting.shape import _is_shape_i_of_x
 from pytensor.tensor.shape import (
     Shape,
     SpecifyShape,
@@ -93,9 +94,9 @@ from pytensor.tensor.subtensor import (
     get_idx_list,
     get_slice_elements,
     inc_subtensor,
-    indices_from_subtensor,
+    indices_from_subtensor, undo_scalarization,
 )
-from pytensor.tensor.type import TensorType, integer_dtypes
+from pytensor.tensor.type import TensorType, integer_dtypes, uint_dtypes
 from pytensor.tensor.type_other import NoneTypeT, SliceConstant, SliceType
 from pytensor.tensor.variable import TensorConstant, TensorVariable
 
@@ -400,11 +401,18 @@ def local_useless_slice(fgraph, node):
         start = s.start
         stop = s.stop
 
-        if start is not None and get_scalar_constant_value(
-            start, only_process_constants=True, raise_not_constant=False
-        ) == (0 if positive_step else -1):
-            change_flag = True
-            start = None
+        if start is not None:
+            if positive_step:
+                if get_scalar_constant_value(start, only_process_constants=True, raise_not_constant=False) == 0:
+                    change_flag = True
+                    start = None
+            else:
+                if (
+                    (get_scalar_constant_value(start, only_process_constants=True, raise_not_constant=False) == -1)
+                    or _is_shape_i_of_x(undo_scalarization(start), x, dim, shape_feature=getattr(fgraph, "shape_feature", None))
+                ):
+                    change_flag = True
+                    start = None
 
         if (
             stop is not None
@@ -547,10 +555,13 @@ def local_subtensor_merge(fgraph, node):
             while (pos_1 < len(slices1)) and (pos_2 < len(slices2)):
                 slice1 = slices1[pos_1]
                 if isinstance(slice1, slice):
-                    merged_slices.append(
-                        merge_two_slices(
+                    res = merge_two_slices(
                             fgraph, slice1, xshape[pos_1], slices2[pos_2], ushape[pos_2]
                         )
+                    if res is None:
+                        return
+                    merged_slices.append(
+                        res
                     )
                     pos_2 += 1
                 else:
@@ -1098,6 +1109,103 @@ def merge_two_slices(fgraph, slice1, len1, slice2, len2):
 
     if not isinstance(slice1, slice):
         raise ValueError("slice1 should be of type `slice`")
+
+    if isinstance(slice2, slice) and 0:
+
+        # Case [::s][a:] -> [a*s::s]
+        # Case [::s][-a:] -> [(-a*s) + 1::s]
+        # Case [::-s][a:] -> [a*s - 1::-s]
+        # Case [::-s][-a:] -> [(-a + 1) * s::-s]
+        if (
+            slice1.start is None
+            and slice1.stop is None
+            and slice1.step is not None
+            and slice2.start is not None
+            and slice2.stop is None
+            and slice2.step is None
+        ):
+            step = undo_scalarization(slice1.step)
+            start = undo_scalarization(slice2.start)
+            if step.dtype in uint_dtypes or start.dtype in uint_dtypes:
+                return
+            new_start = switch(
+                ge(step, 0),
+                switch(
+                    start >= 0,
+                    start * step,
+                    start * step + 1,
+                ),
+                switch(
+                    start >= 0,
+                    start * step - 1,
+                    (start + 1) * step,
+                ),
+            )
+
+            return slice(new_start, None, step)
+
+        # Case [::s][:b] -> [:b*s:s]
+        # Case [::s][:-b] -> [:-b*s:s]
+        # Case [::-s][:b] -> [:(b + 1) * s: s]
+        # Case [::-s][:-b] -> [:(-b + 1) * s: s]
+        elif (
+            slice1.start is None
+            and slice1.start is None
+            and slice1.step is not None
+            and slice2.start is None
+            and slice2.stop is not None
+            and slice2.step is None
+        ):
+            step = undo_scalarization(slice1.step)
+            stop = undo_scalarization(slice2.step)
+            new_stop = switch(
+                stop >= 0,
+                stop * step,
+                (stop + 1) * step,
+            )
+            new_step = step
+            return slice(None, new_stop, new_step)
+
+        # Case [a:b][::s] -> [a:b:s]
+        # Case [a:b][::-s] -> [b-1:a-1:-s]
+        elif (
+            slice1.start is not None
+            and slice1.step is None
+            and slice2.start is None
+            and slice2.stop is None
+            and slice2.step is not None
+        ):
+            step = undo_scalarization(slice2.step)
+            start = undo_scalarization(slice1.start)
+            if step.dtype in uint_dtypes or start.dtype in uint_dtypes:
+                return
+
+            if slice1.stop is None:
+                stop = len1
+            else:
+                stop = undo_scalarization(slice1.stop)
+
+            # TODO: Use eager_switch
+            new_start = switch(
+                step >= 0,
+                start,
+                stop - 1,
+            )
+            new_stop = switch(
+                step >= 0,
+                stop,
+                switch(
+                    eq(start, 0),
+                    # Special case for start == 0, that is equivalent to stop=None
+                    -len1-1,
+                    start - 1,
+                ),
+            )
+            new_step = step
+
+            return slice(new_start, new_stop, new_step)
+
+
 
     sl1, reverse1 = get_canonical_form_slice(slice1, len1)
     sl2, reverse2 = get_canonical_form_slice(slice2, len2)
