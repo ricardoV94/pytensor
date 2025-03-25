@@ -52,7 +52,7 @@ from pytensor.tensor.math import (
     or_,
     variadic_add,
 )
-from pytensor.tensor.math import all as pt_all, abs as pt_abs
+from pytensor.tensor.math import all as pt_all
 from pytensor.tensor.rewriting.basic import (
     register_canonicalize,
     register_specialize,
@@ -61,7 +61,7 @@ from pytensor.tensor.rewriting.basic import (
 from pytensor.tensor.rewriting.extremum import (
     local_extremum_plus_x,
     local_flatten_extremum,
-    local_useless_extremum_branches, _estimate_lower_bound, _estimate_upper_bound,
+    local_useless_extremum_branches,
 )
 from pytensor.tensor.rewriting.math import (
     local_add_canonizer,
@@ -94,7 +94,8 @@ from pytensor.tensor.subtensor import (
     get_idx_list,
     get_slice_elements,
     inc_subtensor,
-    indices_from_subtensor, undo_scalarization,
+    indices_from_subtensor,
+    undo_scalarization,
 )
 from pytensor.tensor.type import TensorType, integer_dtypes, uint_dtypes
 from pytensor.tensor.type_other import NoneTypeT, SliceConstant, SliceType
@@ -403,13 +404,25 @@ def local_useless_slice(fgraph, node):
 
         if start is not None:
             if positive_step:
-                if get_scalar_constant_value(start, only_process_constants=True, raise_not_constant=False) == 0:
+                if (
+                    get_scalar_constant_value(
+                        start, only_process_constants=True, raise_not_constant=False
+                    )
+                    == 0
+                ):
                     change_flag = True
                     start = None
             else:
                 if (
-                    (get_scalar_constant_value(start, only_process_constants=True, raise_not_constant=False) == -1)
-                    or _is_shape_i_of_x(undo_scalarization(start), x, dim, shape_feature=getattr(fgraph, "shape_feature", None))
+                    get_scalar_constant_value(
+                        start, only_process_constants=True, raise_not_constant=False
+                    )
+                    == -1
+                ) or _is_shape_i_of_x(
+                    undo_scalarization(start),
+                    x,
+                    dim,
+                    shape_feature=getattr(fgraph, "shape_feature", None),
                 ):
                     change_flag = True
                     start = None
@@ -422,6 +435,7 @@ def local_useless_slice(fgraph, node):
             )
             == (x.type.shape[dim] if positive_step else -x.type.shape[dim] - 1)
         ):
+            # TODO: If grah is shape_i - x, with x > 1, it's also equivalent to None
             change_flag = True
             stop = None
 
@@ -556,13 +570,11 @@ def local_subtensor_merge(fgraph, node):
                 slice1 = slices1[pos_1]
                 if isinstance(slice1, slice):
                     res = merge_two_slices(
-                            fgraph, slice1, xshape[pos_1], slices2[pos_2], ushape[pos_2]
-                        )
+                        fgraph, slice1, xshape[pos_1], slices2[pos_2], ushape[pos_2]
+                    )
                     if res is None:
                         return
-                    merged_slices.append(
-                        res
-                    )
+                    merged_slices.append(res)
                     pos_2 += 1
                 else:
                     merged_slices.append(slice1)
@@ -1110,8 +1122,7 @@ def merge_two_slices(fgraph, slice1, len1, slice2, len2):
     if not isinstance(slice1, slice):
         raise ValueError("slice1 should be of type `slice`")
 
-    if isinstance(slice2, slice) and 0:
-
+    if isinstance(slice2, slice) and 1:
         # Case [::s][a:] -> [a*s::s]
         # Case [::s][-a:] -> [(-a*s) + 1::s]
         # Case [::-s][a:] -> [a*s - 1::-s]
@@ -1166,46 +1177,108 @@ def merge_two_slices(fgraph, slice1, len1, slice2, len2):
             new_step = step
             return slice(None, new_stop, new_step)
 
-        # Case [a:b][::s] -> [a:b:s]
-        # Case [a:b][::-s] -> [b-1:a-1:-s]
+        # Case[a?:b?:][c?:d?:] -> [a+c:b+d:s]
+        elif slice1.step is None and slice2.step is None:
+            if slice1.start is None:
+                start1 = 0
+            else:
+                start1 = undo_scalarization(slice1.start)
+                if start1.dtype in uint_dtypes:
+                    return
+                start1 = switch(start1 >= 0, start1, maximum(0, len1 + start1))
+
+            if slice2.start is None:
+                start2 = 0
+            else:
+                start2 = undo_scalarization(slice2.start)
+                if start2.dtype in uint_dtypes:
+                    return
+                start2 = switch(start2 >= 0, start2, maximum(0, len2 + start2))
+
+            new_start = start1 + start2
+
+            if slice1.stop is None and slice2.stop is None:
+                new_stop = None
+            elif slice1.stop is not None and slice2.stop is None:
+                new_stop = slice1.stop
+            elif slice1.stop is None and slice2.stop is not None:
+                stop2 = undo_scalarization(slice2.stop)
+                new_stop = start1 + switch(stop2 >= 0, stop2, maximum(0, len2 + stop2))
+            else:
+                # if both negative: new_stop = stop1 + stop2
+                stop1 = undo_scalarization(slice1.stop)
+                stop2 = undo_scalarization(slice2.stop)
+                pos_stop1 = ge(stop1, 0)
+                pos_stop2 = ge(stop2, 0)
+                new_stop = switch(
+                    pos_stop1 & pos_stop2,
+                    # Only one of the two stops matters when converted to the original tensor
+                    minimum(stop1, start1 + stop2),
+                    switch(
+                        pos_stop1 & ~pos_stop2,
+                        # First stop may not matter if it's beyond the end of the tensor
+                        # Second always does
+                        maximum(stop1, len1) + stop2,
+                        switch(
+                            # if first is negative and second positive, make both positive and reduce to first case
+                            ~pos_stop1 & pos_stop2,
+                            minimum(maximum(0, len1 + stop1), start1 + stop2),
+                            # Finally if both negative just add the negative entries
+                            stop1 + stop2,
+                        ),
+                    ),
+                )
+
+            return slice(new_start, new_stop, None)
+
+        # Case [a?:b?][::s] -> [a:b:s]
+        # Case [a?:b?][::-s] -> [b-1:a-1:-s]
         elif (
-            slice1.start is not None
-            and slice1.step is None
+            slice1.step is None
             and slice2.start is None
             and slice2.stop is None
             and slice2.step is not None
         ):
             step = undo_scalarization(slice2.step)
-            start = undo_scalarization(slice1.start)
-            if step.dtype in uint_dtypes or start.dtype in uint_dtypes:
-                return
+            if step.dtype in uint_dtypes:
+                return None
+
+            positive_step = step >= 0
+            if slice1.start is None:
+                pos_step_start = 0
+                # Numerical equivalent to stop = None when step is negative
+                neg_step_start = -len1 - 1
+            else:
+                start = undo_scalarization(slice1.start)
+                if start.dtype in uint_dtypes:
+                    return None
+                pos_step_start = start
+                # Special case for start == 0, that is equivalent to stop=None
+                neg_step_start = switch(eq(start, 0), -len1 - 1, start - 1)
 
             if slice1.stop is None:
                 stop = len1
             else:
                 stop = undo_scalarization(slice1.stop)
+                if stop.dtype in uint_dtypes:
+                    return None
 
             # TODO: Use eager_switch
             new_start = switch(
-                step >= 0,
-                start,
+                positive_step,
+                pos_step_start,
                 stop - 1,
             )
             new_stop = switch(
-                step >= 0,
+                positive_step,
                 stop,
-                switch(
-                    eq(start, 0),
-                    # Special case for start == 0, that is equivalent to stop=None
-                    -len1-1,
-                    start - 1,
-                ),
+                neg_step_start,
             )
             new_step = step
 
             return slice(new_start, new_stop, new_step)
 
-
+    return None
 
     sl1, reverse1 = get_canonical_form_slice(slice1, len1)
     sl2, reverse2 = get_canonical_form_slice(slice2, len2)
