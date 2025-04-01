@@ -39,6 +39,7 @@ from pytensor.graph.rewriting.basic import (
     copy_stack_trace,
     in2out,
     node_rewriter,
+    out2in,
 )
 from pytensor.graph.rewriting.db import RewriteDatabase
 from pytensor.raise_op import Assert, CheckAndRaise, assert_op
@@ -65,7 +66,7 @@ from pytensor.tensor.basic import (
     zeros,
     zeros_like,
 )
-from pytensor.tensor.elemwise import DimShuffle, Elemwise
+from pytensor.tensor.elemwise import DimShuffle, Elemwise, ExpandDims2
 from pytensor.tensor.exceptions import NotScalarConstantError
 from pytensor.tensor.extra_ops import broadcast_arrays
 from pytensor.tensor.math import Sum, add, eq, variadic_add
@@ -1356,3 +1357,18 @@ def local_join_of_alloc(fgraph, node):
     new_out = alloc(new_join, *post_join_shape)
     copy_stack_trace(node.outputs[0], new_out)
     return [new_out]
+
+
+@node_rewriter([DimShuffle])
+def dimshuffle_to_expand_dims(fgraph, node):
+    if node.op.is_expand_dims:
+        return [ExpandDims2(node.op.augment)(node.inputs[0])]
+
+
+compile.optdb.register(
+    dimshuffle_to_expand_dims.__name__,
+    out2in(dimshuffle_to_expand_dims),
+    "fast_run",
+    "cxx_only",
+    position=4,
+)
