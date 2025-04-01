@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from copy import copy
 from textwrap import dedent
 from typing import Literal
@@ -272,6 +272,85 @@ class DimShuffle(ExternalCOp):
             return [x.zeros_like(dtype=config.floatX)]
         else:
             return [gz.dimshuffle(grad_order)]
+
+
+class ExpandDims2(COp):
+    __props__ = ("axis",)
+
+    view_map = {0: [0]}
+
+    def __init__(self, axis):
+        if isinstance(axis, int):
+            axis = (axis,)
+        else:
+            axis = tuple(axis)
+        self.axis = axis
+
+    def make_node(self, inp):
+        out_shape = inp.type.shape
+        if out_shape == ():
+            out_shape = [1] * len(self.axis)
+        else:
+            out_shape = tuple(np.insert(out_shape, self.axis, 1))
+        return Apply(self, [inp], [TensorType(dtype=inp.dtype, shape=out_shape)()])
+
+    def perform(self, node, inp, out):
+        out[0][0] = np.expand_dims(inp[0], self.axis)
+
+    def c_code(self, node, name, input_names, output_names, sub):
+        [inp] = input_names
+        [out] = output_names
+        nd_in = node.inputs[0].ndim
+        nd_out = node.outputs[0].ndim
+        fail = sub["fail"]
+
+        code = f"npy_intp dimensions[{nd_out}];\n"
+        code += f"npy_intp strides[{nd_out}];\n"
+
+        code += dedent(
+            f"""
+            if (PyArray_NDIM({inp}) != {nd_in}) {{
+                PyErr_SetString(PyExc_ValueError, "ExpandDims: Input dimensions do not match expected.");
+                {fail}
+            }}
+            """
+        )
+
+        j = 0
+        for i in range(nd_out):
+            if i in self.axis:
+                code += f"dimensions[{i}] = 1;\n"
+                code += f"strides[{i}] = PyArray_ITEMSIZE({inp});\n"
+            else:
+                code += f"dimensions[{i}] = PyArray_DIMS({inp})[{j}];\n"
+                code += f"strides[{i}] = PyArray_DIMS({inp})[{j}] == 1 ? PyArray_ITEMSIZE({inp}) : PyArray_STRIDES({inp})[{j}];\n"
+                j += 1
+
+        code += dedent(
+            f"""
+            Py_XDECREF({out});
+
+            Py_INCREF(PyArray_DESCR({inp}));
+            {out} = (PyArrayObject*)PyArray_NewFromDescr(&PyArray_Type,
+                                                PyArray_DESCR({inp}),
+                                                {nd_out}, dimensions,
+                                                strides,
+                                                PyArray_DATA({inp}),
+                                                (PyArray_FLAGS({inp}) & ~NPY_ARRAY_OWNDATA),
+                                                NULL);
+
+            if ({out} == NULL) {{
+            }}
+
+            // Declare it a view of the original input
+            Py_INCREF((PyObject*){inp});
+            PyArray_SetBaseObject({out}, (PyObject*){inp});
+            """
+        )
+        return code
+
+    def c_code_cache_version(self) -> tuple[Hashable, ...]:
+        return (0,)
 
 
 class DimShufflePrinter(Printer):
