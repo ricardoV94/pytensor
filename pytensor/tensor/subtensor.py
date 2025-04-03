@@ -3,6 +3,7 @@ import sys
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from itertools import chain, groupby
+from textwrap import dedent
 from typing import cast, overload
 
 import numpy as np
@@ -2170,22 +2171,73 @@ class AdvancedSubtensor1(COp):
                 "c_code defined for AdvancedSubtensor1, not for child class",
                 type(self),
             )
+        x, idxs = node.inputs
+        dim0 = x.type.shape
+        if (
+            dim0 is not None
+            and isinstance(idxs, Constant)
+            and (
+                (idxs.data.max() < dim0)
+                and ((idxs.data.min() >= 0) or (idxs.data.min() > -dim0))
+            )
+        ):
+            # We can know ahead of time that all indices are valid, so we can use a faster mode in the C-impl
+            mode = "NPY_WRAP"  # This seems to be faster than NPY_CLIP
+        else:
+            mode = "NPY_RAISE"
         a_name, i_name = input_names[0], input_names[1]
         output_name = output_names[0]
         fail = sub["fail"]
+        if mode == "NPY_RAISE":
+            # numpy_take always makes an intermediate if npy_raise is True which is slower than just allocating a new buffer
+            # link:
+            manage_pre_allocated_out = dedent(
+                f"""
+                if ({output_name} != NULL) {{
+                    // Numpy TakeFrom is always slower when copying
+                    // https://github.com/numpy/numpy/issues/28636
+                    Py_CLEAR({output_name});
+                }}
+                """
+            )
+        else:
+            manage_pre_allocated_out = dedent(
+                f"""
+                if ({output_name} != NULL) {{
+                    npy_intp nd = PyArray_NDIM({a_name}) + PyArray_NDIM({i_name}) - 1;
+                    if (PyArray_NDIM({output_name}) != nd) {{
+                        Py_CLEAR({output_name});
+                    }}
+                    else {{
+                        int i;
+                        npy_intp* shape = PyArray_DIMS({output_name});
+                        for (i = 0; i < PyArray_NDIM({i_name}); i++) {{
+                            if (shape[i] != PyArray_DIMS({i_name})[i]) {{
+                                Py_CLEAR({output_name});
+                                break;
+                            }}
+                        }}
+                        if ({output_name} != NULL) {{
+                            for (; i < nd; i++) {{
+                                if (shape[i] != PyArray_DIMS({a_name})[i-PyArray_NDIM({i_name})+1]) {{
+                                    Py_CLEAR({output_name});
+                                    break;
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+                """
+            )
         return f"""
-            if ({output_name} != NULL) {{
-                // Numpy TakeFrom is always slower when copying
-                // https://github.com/numpy/numpy/issues/28636
-                Py_CLEAR({output_name});
-            }}
+            {manage_pre_allocated_out}
             {output_name} = (PyArrayObject*)PyArray_TakeFrom(
-                        {a_name}, (PyObject*){i_name}, 0, {output_name}, NPY_RAISE);
+                        {a_name}, (PyObject*){i_name}, 0, {output_name}, {mode});
             if ({output_name} == NULL) {fail};
         """
 
     def c_code_cache_version(self):
-        return (5,)
+        return (6,)
 
 
 advanced_subtensor1 = AdvancedSubtensor1()
