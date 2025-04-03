@@ -2120,16 +2120,12 @@ class AdvancedSubtensor1(COp):
         out_shape = (ilist_.type.shape[0], *x_.type.shape[1:])
         return Apply(self, [x_, ilist_], [TensorType(dtype=x.dtype, shape=out_shape)()])
 
-    def perform(self, node, inp, out_):
+    def perform(self, node, inp, output_storage):
         x, i = inp
-        (out,) = out_
-        # Copy always implied by numpy advanced indexing semantic.
-        if out[0] is not None and out[0].shape == (len(i),) + x.shape[1:]:
-            o = out[0]
-        else:
-            o = None
 
-        out[0] = x.take(i, axis=0, out=o)
+        # Numpy take is always slower when out is provided
+        # https://github.com/numpy/numpy/issues/28636
+        output_storage[0][0] = x.take(i, axis=0, out=None)
 
     def connection_pattern(self, node):
         rval = [[True], *([False] for _ in node.inputs[1:])]
@@ -2179,29 +2175,9 @@ class AdvancedSubtensor1(COp):
         fail = sub["fail"]
         return f"""
             if ({output_name} != NULL) {{
-                npy_intp nd, i, *shape;
-                nd = PyArray_NDIM({a_name}) + PyArray_NDIM({i_name}) - 1;
-                if (PyArray_NDIM({output_name}) != nd) {{
-                    Py_CLEAR({output_name});
-                }}
-                else {{
-                    shape = PyArray_DIMS({output_name});
-                    for (i = 0; i < PyArray_NDIM({i_name}); i++) {{
-                        if (shape[i] != PyArray_DIMS({i_name})[i]) {{
-                            Py_CLEAR({output_name});
-                            break;
-                        }}
-                    }}
-                    if ({output_name} != NULL) {{
-                        for (; i < nd; i++) {{
-                            if (shape[i] != PyArray_DIMS({a_name})[
-                                                i-PyArray_NDIM({i_name})+1]) {{
-                                Py_CLEAR({output_name});
-                                break;
-                            }}
-                        }}
-                    }}
-                }}
+                // Numpy TakeFrom is always slower when copying
+                // https://github.com/numpy/numpy/issues/28636
+                Py_CLEAR({output_name});
             }}
             {output_name} = (PyArrayObject*)PyArray_TakeFrom(
                         {a_name}, (PyObject*){i_name}, 0, {output_name}, NPY_RAISE);
@@ -2209,7 +2185,7 @@ class AdvancedSubtensor1(COp):
         """
 
     def c_code_cache_version(self):
-        return (4,)
+        return (5,)
 
 
 advanced_subtensor1 = AdvancedSubtensor1()
