@@ -2151,11 +2151,7 @@ class TestJoinAndSplit:
         res = f(x_test)
         for r, expected in zip(res, ([], [0, 1, 2], [3, 4]), strict=True):
             assert np.allclose(r, expected)
-            if linker == "py":
-                assert r.base is x_test
-            else:
-                # C impl always makes a copy
-                assert r.base is not x_test
+            assert r.base is x_test
 
     @pytest.mark.parametrize("gc", (True, False), ids=lambda x: f"gc={x}")
     @pytest.mark.parametrize("memory_layout", ["C-contiguous", "F-contiguous", "Mixed"])
