@@ -118,6 +118,8 @@ class TensorType(CType[np.ndarray], HasDataType, HasShape):
                 f"TensorType broadcastable/shape must be a boolean, integer or None, got {type(s)} {s}"
             )
 
+        if not isinstance(shape, tuple | list):
+            shape = (shape,)
         self.shape = tuple(parse_bcast_and_shape(s) for s in shape)
         self.dtype_specs()  # error checking is done there
         self.name = name
