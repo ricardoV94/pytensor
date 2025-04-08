@@ -564,6 +564,7 @@ class WrapLinker(Linker):
                     raise_with_op(self.fgraph, node, *thunks)
 
         f.thunk_groups = thunk_groups
+        f.allow_gc = len(self.linkers) == 1
 
         return f, inputs0, outputs0
 
@@ -701,6 +702,8 @@ class JITLinker(PerformLinker):
                     raise_with_op(self.fgraph, output_nodes[0], thunk)
                 assert res is None
                 return thunk_outputs
+
+            return thunk_outputs
 
         thunk.inputs = thunk_inputs
         thunk.outputs = thunk_outputs
