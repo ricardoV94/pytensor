@@ -207,8 +207,8 @@ def streamline(
             for x in no_recycling:
                 x[0] = None
             try:
-                # strict=False because we are in a hot loop
-                for thunk, node in zip(thunks, order, strict=False):
+                # strict=None because we are in a hot loop
+                for thunk, node in zip(thunks, order):  # noqa: B905
                     thunk()
             except Exception:
                 raise_with_op(fgraph, node, thunk)

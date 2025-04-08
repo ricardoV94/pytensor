@@ -1347,7 +1347,7 @@ def test_empty_givens_updates():
     function([In(x)], y, updates={})
 
 
-@pytest.mark.parametrize("trust_input", [True, False])
+@pytest.mark.parametrize("trust_input", [True, False], ids=lambda x: f"trust_input={x}")
 def test_minimal_random_function_call_benchmark(trust_input, benchmark):
     rng = random_generator_type()
     x = normal(rng=rng, size=(100,))
@@ -1357,3 +1357,18 @@ def test_minimal_random_function_call_benchmark(trust_input, benchmark):
 
     rng_val = np.random.default_rng()
     benchmark(f, rng_val)
+
+
+@pytest.mark.parametrize("trust_input", [True, False], ids=lambda x: f"trust_input={x}")
+@pytest.mark.parametrize("allow_gc", [True, False], ids=["GC", "NO-GC"])
+def test_overhead_benchmar(trust_input, allow_gc, benchmark):
+    x = pt.vector("x")
+    fn = function(
+        [In(x, borrow=True)],
+        Out(x, borrow=True),
+        trust_input=trust_input,
+        mode=Mode(linker="cvm", optimizer=None),
+    )
+    fn.vm.allow_gc = allow_gc
+    x_test = np.zeros(10)
+    benchmark(fn, x_test)
