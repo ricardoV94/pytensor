@@ -364,7 +364,38 @@ def max_and_argmax(a, axis=None, keepdims=False):
 
 class FixedOpCAReduce(CAReduce):
     def __str__(self):
-        return f"{type(self).__name__}{{{self._axis_str()}}}"
+        return f"{type(self).__name__}{{{self._axis_str()}, keepdims={self.keepdims}}}"
+
+    def clone(
+        self,
+        axis=None,
+        dtype=None,
+        acc_dtype=None,
+        upcast_discrete_output=None,
+        keepdims=None,
+        **kwargs,
+    ):
+        if axis is None:
+            axis = self.axis
+        if dtype is None:
+            dtype = self.dtype
+        if acc_dtype is None:
+            acc_dtype = self.acc_dtype
+        if upcast_discrete_output is None:
+            upcast_discrete_output = self.upcast_discrete_output
+        if keepdims is None:
+            keepdims = self.keepdims
+        res = type(self)(
+            axis=axis,
+            dtype=dtype,
+            acc_dtype=acc_dtype,
+            upcast_discrete_output=upcast_discrete_output,
+            keepdims=keepdims,
+            **kwargs,
+        )
+        assert res.scalar_op == self.scalar_op
+
+        return res
 
 
 class NonZeroDimsCAReduce(FixedOpCAReduce):
@@ -3468,10 +3499,6 @@ class Any(FixedOpCAReduce):
         (x,) = inp
         return [x.zeros_like(config.floatX)]
 
-    def clone(self, **kwargs):
-        axis = kwargs.get("axis", self.axis)
-        return type(self)(axis=axis)
-
 
 class Sum(FixedOpCAReduce):
     """
@@ -3485,13 +3512,23 @@ class Sum(FixedOpCAReduce):
 
     nfunc_spec = ("sum", 1, 1)
 
-    def __init__(self, axis=None, dtype=None, acc_dtype=None):
+    def __init__(
+        self,
+        axis=None,
+        dtype=None,
+        acc_dtype=None,
+        keepdims=False,
+        upcast_discrete_output=True,
+    ):
+        if not upcast_discrete_output:
+            raise ValueError("Sum only supports `upcast_discrete_output=True`")
         super().__init__(
             ps.add,
             axis=axis,
             dtype=dtype,
             acc_dtype=acc_dtype,
             upcast_discrete_output=True,
+            keepdims=keepdims,
         )
 
     def L_op(self, inp, out, grads):
@@ -3501,21 +3538,12 @@ class Sum(FixedOpCAReduce):
             return [x.zeros_like(dtype=config.floatX)]
 
         (gz,) = grads
-        gz = as_tensor_variable(gz)
-        axis = self.axis
-        if axis is None:
-            axis = list(range(x.type.ndim))
-        if axis == ():
-            return (gz,)
-        new_dims = []
-        i = 0
-        for j, _ in enumerate(x.type.broadcastable):
-            if j in axis:
-                new_dims.append("x")
-            else:
-                new_dims.append(i)
-                i += 1
-        gx = Elemwise(ps.second)(x, gz.dimshuffle(new_dims))
+        if not self.keepdims:
+            axis = self.axis
+            if axis is None:
+                axis = list(range(x.type.ndim))
+            gz = expand_dims(gz, axis)
+        gx = Elemwise(ps.second)(x, gz)
         return [gx]
 
     def R_op(self, inputs, eval_points):
@@ -3524,12 +3552,6 @@ class Sum(FixedOpCAReduce):
         if None in eval_points:
             return [None]
         return self(*eval_points, return_list=True)
-
-    def clone(self, **kwargs):
-        axis = kwargs.get("axis", self.axis)
-        dtype = kwargs.get("dtype", self.dtype)
-        acc_dtype = kwargs.get("acc_dtype", self.acc_dtype)
-        return type(self)(axis=axis, dtype=dtype, acc_dtype=acc_dtype)
 
 
 def sum(input, axis=None, dtype=None, keepdims=False, acc_dtype=None):
@@ -3552,7 +3574,8 @@ def sum(input, axis=None, dtype=None, keepdims=False, acc_dtype=None):
 
     """
 
-    out = Sum(axis=axis, dtype=dtype, acc_dtype=acc_dtype)(input)
+    # We move keepdims into the Op during specialization
+    out = Sum(axis=axis, dtype=dtype, acc_dtype=acc_dtype, keepdims=False)(input)
 
     if keepdims:
         out = makeKeepDims(input, out, axis)

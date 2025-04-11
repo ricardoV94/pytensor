@@ -307,14 +307,14 @@ class ExpandDims2(COp):
         code = f"npy_intp dimensions[{nd_out}];\n"
         code += f"npy_intp strides[{nd_out}];\n"
 
-        code += dedent(
-            f"""
-            if (PyArray_NDIM({inp}) != {nd_in}) {{
-                PyErr_SetString(PyExc_ValueError, "ExpandDims: Input dimensions do not match expected.");
-                {fail}
-            }}
-            """
-        )
+        # code += dedent(
+        #     f"""
+        #     if (PyArray_NDIM({inp}) != {nd_in}) {{
+        #         PyErr_SetString(PyExc_ValueError, "ExpandDims: Input dimensions do not match expected.");
+        #         {fail}
+        #     }}
+        #     """
+        # )
 
         j = 0
         for i in range(nd_out):
@@ -323,7 +323,7 @@ class ExpandDims2(COp):
                 code += f"strides[{i}] = PyArray_ITEMSIZE({inp});\n"
             else:
                 code += f"dimensions[{i}] = PyArray_DIMS({inp})[{j}];\n"
-                code += f"strides[{i}] = PyArray_DIMS({inp})[{j}] == 1 ? PyArray_ITEMSIZE({inp}) : PyArray_STRIDES({inp})[{j}];\n"
+                code += f"strides[{i}] = PyArray_STRIDES({inp})[{j}];\n"
                 j += 1
 
         code += dedent(
@@ -1249,7 +1249,14 @@ class CAReduce(COp):
 
     """
 
-    __props__ = ("scalar_op", "axis", "dtype", "acc_dtype", "upcast_discrete_output")
+    __props__ = (
+        "scalar_op",
+        "axis",
+        "dtype",
+        "acc_dtype",
+        "upcast_discrete_output",
+        "keepdims",
+    )
 
     def __init__(
         self,
@@ -1258,6 +1265,7 @@ class CAReduce(COp):
         dtype=None,
         acc_dtype=None,
         upcast_discrete_output=False,
+        keepdims=False,
     ):
         """
 
@@ -1316,6 +1324,7 @@ class CAReduce(COp):
         self.dtype = dtype
         self.acc_dtype = acc_dtype
         self.upcast_discrete_output = upcast_discrete_output
+        self.keepdims = keepdims
 
     @property
     def ufunc(self):
@@ -1416,16 +1425,26 @@ class CAReduce(COp):
         axis = normalize_reduce_axis(self.axis, ndim=input.type.ndim)
 
         if axis != self.axis or dtype != self.dtype or acc_dtype != self.acc_dtype:
-            op = self.clone(axis=axis, dtype=dtype, acc_dtype=acc_dtype)
+            op = self.clone(
+                axis=axis, dtype=dtype, acc_dtype=acc_dtype, keepdims=self.keepdims
+            )
         else:
             op = self
 
-        if axis is None:
-            out_shape = ()
-        else:
-            out_shape = tuple(
-                s for i, s in enumerate(input.type.shape) if i not in axis
-            )
+        if not self.keepdims:
+            if axis is None:
+                out_shape = ()
+            else:
+                out_shape = tuple(
+                    s for i, s in enumerate(input.type.shape) if i not in axis
+                )
+        if self.keepdims:
+            if axis is None:
+                out_shape = (1,) * input.type.ndim
+            else:
+                out_shape = tuple(
+                    1 if i in axis else s for i, s in enumerate(input.type.shape)
+                )
 
         output = TensorType(dtype=dtype, shape=out_shape)()
 
@@ -1437,6 +1456,7 @@ class CAReduce(COp):
         dtype=None,
         acc_dtype=None,
         upcast_discrete_output=None,
+        keepdims=None,
         **kwargs,
     ):
         if axis is None:
@@ -1447,13 +1467,15 @@ class CAReduce(COp):
             acc_dtype = self.acc_dtype
         if upcast_discrete_output is None:
             upcast_discrete_output = self.upcast_discrete_output
-
+        if keepdims is None:
+            keepdims = self.keepdims
         res = type(self)(
             self.scalar_op,
             axis=axis,
             dtype=dtype,
             acc_dtype=acc_dtype,
-            upcast_discrete_output=None,
+            upcast_discrete_output=upcast_discrete_output,
+            keepdims=keepdims,
             **kwargs,
         )
 
@@ -1469,7 +1491,7 @@ class CAReduce(COp):
             return f"axes={list(axis)}"
 
     def __str__(self):
-        return f"{type(self).__name__}{{{self.scalar_op}, {self._axis_str()}}}"
+        return f"{type(self).__name__}{{{self.scalar_op}, {self._axis_str()}, keepdims={self.keepdims}}}"
 
     def perform(self, node, inp, out):
         (input,) = inp
@@ -1487,16 +1509,28 @@ class CAReduce(COp):
 
         input = np.array(input, dtype=acc_dtype)
 
-        out = self.ufunc.reduce(input, axis=axis, dtype=acc_dtype)
+        out = self.ufunc.reduce(
+            input, axis=axis, dtype=acc_dtype, keepdims=self.keepdims
+        )
 
         output[0] = np.asarray(out, dtype=out_dtype)
 
     def infer_shape(self, fgraph, node, shapes):
-        (ishape,) = shapes
         axis = self.axis
-        if axis is None:
-            return ((),)
-        return ([ishape[i] for i in range(node.inputs[0].type.ndim) if i not in axis],)
+
+        (ishape,) = shapes
+        ndim = node.inputs[0].type.ndim
+        if self.keepdims:
+            if axis is None:
+                shape = [1] * ndim
+            else:
+                shape = [1 if i in axis else ishape[i] for i in range(ndim)]
+        else:
+            if axis is None:
+                shape = ()
+            else:
+                shape = [ishape[i] for i in range(ndim) if i not in axis]
+        return (shape,)
 
     def _c_all(self, node, name, input_names, output_names, sub):
         [inp] = node.inputs
@@ -1534,9 +1568,6 @@ class CAReduce(COp):
             return var.owner.op._c_all(var.owner, name, input_names, output_names, sub)
 
         inp_dims = list(range(ndim))
-        non_reduced_dims = [i for i in inp_dims if i not in axis]
-        counter = iter(range(ndim))
-        acc_dims = ["x" if i in axis else next(counter) for i in range(ndim)]
 
         sub = sub.copy()
         sub["lv0"] = inp_name
@@ -1559,17 +1590,35 @@ class CAReduce(COp):
 
         # Define strides of output array and allocate it
         out_sub = sub | {"lv0": out_name}
-        alloc = (
-            cgen.make_declare(
-                [acc_dims], [out_dtype], out_sub, compute_stride_jump=False
+        if not self.keepdims:
+            counter = iter(range(ndim))
+            acc_dims = ["x" if i in axis else next(counter) for i in range(ndim)]
+            non_reduced_dims = [i for i in inp_dims if i not in axis]
+
+            alloc = (
+                cgen.make_declare(
+                    [acc_dims], [out_dtype], out_sub, compute_stride_jump=False
+                )
+                + cgen.make_alloc([non_reduced_dims], out_dtype, sub)
+                + cgen.make_checks(
+                    [acc_dims], [out_dtype], out_sub, compute_stride_jump=False
+                )
             )
-            + cgen.make_alloc([non_reduced_dims], out_dtype, sub)
-            + cgen.make_checks(
-                [acc_dims], [out_dtype], out_sub, compute_stride_jump=False
+        else:
+            acc_dims = ["x" if i in axis else i for i in range(ndim)]
+
+            alloc = (
+                cgen.make_declare(
+                    [acc_dims], [out_dtype], out_sub, compute_stride_jump=False
+                )
+                + cgen.make_alloc([acc_dims], out_dtype, sub)
+                + cgen.make_checks(
+                    [acc_dims], [out_dtype], out_sub, compute_stride_jump=False
+                )
             )
-        )
 
         if acc_dtype != out_dtype:
+            raise NotImplementedError
             # Define strides of accumulation buffer and allocate it
             sub["lv1"] = acc_name
             sub["olv"] = acc_name
@@ -1623,7 +1672,7 @@ class CAReduce(COp):
             sub,
         )
 
-        if out.type.ndim == 0:
+        if all(out.type.broadcastable) and 1:
             # Simple case where everything is reduced, no need for loop ordering
             loop = cgen.make_complete_loop_careduce(
                 inp_var=inp_name,
@@ -1644,6 +1693,7 @@ class CAReduce(COp):
                 reduction_axes=axis,
                 initial_value=initial_value,
                 inner_task=inner_task,
+                keepdims=self.keepdims,
             )
 
         if acc_dtype != out_dtype:
@@ -1659,7 +1709,9 @@ class CAReduce(COp):
         return setup, alloc, loop, cast
 
     def c_code(self, node, name, inames, onames, sub):
+        sub["fail"] = "//fail"
         code = "\n".join(self._c_all(node, name, inames, onames, sub))
+        # print(code)
         return code
 
     def c_headers(self, **kwargs):
@@ -1668,7 +1720,7 @@ class CAReduce(COp):
 
     def c_code_cache_version_apply(self, node):
         # the version corresponding to the c code in this Op
-        version = [10]
+        version = [11]
 
         # now we insert versions for the ops on which we depend...
         scalar_node = Apply(
