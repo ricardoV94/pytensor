@@ -4,10 +4,12 @@ import warnings
 from collections.abc import Callable, Sequence
 from copy import copy
 from functools import partial
+from itertools import chain
 from typing import Union, cast
 
 from pytensor.compile.function import function
 from pytensor.compile.function.pfunc import rebuild_collect_shared
+from pytensor.compile.io import In, Out
 from pytensor.compile.sharedvalue import SharedVariable
 from pytensor.configdefaults import config
 from pytensor.gradient import DisconnectedType, Rop, grad
@@ -19,7 +21,7 @@ from pytensor.graph.basic import (
     graph_inputs,
     io_connection_pattern,
 )
-from pytensor.graph.fg import FunctionGraph
+from pytensor.graph.fg import FunctionGraph, Output
 from pytensor.graph.null_type import NullType
 from pytensor.graph.op import HasInnerGraph, Op
 from pytensor.graph.replace import clone_replace
@@ -432,6 +434,21 @@ class OpFromGraph(Op, HasInnerGraph):
         if name is not None:
             assert isinstance(name, str), "name must be None or string object"
         self.name = name
+
+        views = set()
+        inner_clients = self.fgraph.clients
+        for i, inner_inp in enumerate(self.fgraph.inputs):
+            for client, client_inp_idx in inner_clients[inner_inp]:
+                if isinstance(client.op, Output):
+                    views.add(i)
+                    break
+                if client.op.view_map and any(
+                    client_inp_idx in view for view in client.op.view_map.values()
+                ):
+                    views.add(i)
+                    break
+        view_map = {0: sorted(views)} if views else {}
+        self.view_map = view_map
         self.destroy_map = destroy_map if destroy_map is not None else {}
 
     def __eq__(self, other):
@@ -853,7 +870,20 @@ class OpFromGraph(Op, HasInnerGraph):
         if getattr(self, "_fn", None) is not None:
             return self._fn
 
-        self._fn = function(self.inner_inputs, self.inner_outputs, **self.kwargs)
+        destroyed_inputs = (
+            set(chain.from_iterable(self.destroy_map.values()))
+            if self.destroy_map
+            else set()
+        )
+        viewed_inputs = set(chain.from_iterable(self.view_map.values()))
+        wrapped_inps = [
+            In(inner_inp, mutable=i in destroyed_inputs, borrow=i in viewed_inputs)
+            for i, inner_inp in enumerate(self.inner_inputs)
+        ]
+        wrapped_outs = [Out(inner_out, borrow=True) for inner_out in self.inner_outputs]
+        self._fn = function(
+            wrapped_inps, wrapped_outs, **self.kwargs, accept_inplace=self.destroy_map
+        )
         self._fn.trust_input = True
 
         return self._fn
@@ -870,6 +900,52 @@ class OpFromGraph(Op, HasInnerGraph):
         res = copy(self)
         res.fgraph = res.fgraph.clone()
         return res
+
+    def make_thunk(self, node, storage_map, compute_map, no_recycling, impl=None):
+        from pytensor.link.c.basic import CLinker
+        from pytensor.link.vm import VMLinker
+
+        # FIXME: Don't call self.fn just to get the optimized fgraph
+        fg = self.fn.maker.fgraph
+        # fg = self.fgraph
+        # rewriter = get_default_mode().optimizer
+        # rewriter(fg)
+        fg_no_recycling = [
+            new_o
+            for (new_o, old_o) in zip(fg.outputs, node.outputs, strict=True)
+            if old_o in no_recycling
+        ]
+
+        node_input_storage = [storage_map[r] for r in node.inputs]
+        node_output_storage = [storage_map[r] for r in node.outputs]
+
+        def create_thunk(linker):
+            linker.accept(fg, no_recycling=fg_no_recycling)
+            thunk, _, _ = linker.make_thunk(
+                input_storage=node_input_storage, output_storage=node_output_storage
+            )
+
+            if isinstance(linker, VMLinker):
+                # VMs will complain if a non-lazy thunk returns anything
+                # We wrap it in a function that returns None
+                def thunk_without_returns():
+                    thunk()
+
+                return thunk_without_returns
+
+            return thunk
+
+        if impl != "py":
+            try:
+                # We default to CLinker because it generates code for the whole graph that the compiler can reason about.
+                # Whereas the VMLinker will compile each node separately and call them in a pre-defined VM.
+                # It also has less overhead
+                return create_thunk(linker=CLinker())
+            except NotImplementedError:
+                # Some Op doesn't have a C implementation, VM it is
+                return create_thunk(linker=VMLinker(use_cloop=True, c_thunks=True))
+        else:
+            return create_thunk(VMLinker(use_cloop=False, c_thunks=False))
 
     def perform(self, node, inputs, outputs):
         variables = self.fn(*inputs)

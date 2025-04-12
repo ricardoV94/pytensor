@@ -220,8 +220,7 @@ def streamline(
         def streamline_fast_f():
             for x in no_recycling:
                 x[0] = None
-            for thunk in thunks:
-                thunk()
+            [thunk() for thunk in thunks]
 
         f = streamline_fast_f
     return f
