@@ -6,8 +6,11 @@ from copy import copy
 from functools import partial
 from typing import Union, cast
 
-from pytensor.compile.function import function
-from pytensor.compile.function.pfunc import rebuild_collect_shared
+from pytensor.compile import get_default_mode, insert_deepcopy
+from pytensor.compile.function.pfunc import pfunc, rebuild_collect_shared
+from pytensor.compile.function.types import add_supervisor_to_fgraph
+from pytensor.compile.io import In, Out
+from pytensor.compile.mode import Mode
 from pytensor.compile.sharedvalue import SharedVariable
 from pytensor.configdefaults import config
 from pytensor.gradient import DisconnectedType, Rop, grad
@@ -433,6 +436,7 @@ class OpFromGraph(Op, HasInnerGraph):
             assert isinstance(name, str), "name must be None or string object"
         self.name = name
         self.destroy_map = destroy_map if destroy_map is not None else {}
+        self._prepared_fgraph = None
 
     def __eq__(self, other):
         # TODO: recognize a copy
@@ -847,14 +851,51 @@ class OpFromGraph(Op, HasInnerGraph):
 
         return ret
 
+    def _prepare_fgraph(self, impl):
+        if self._prepared_fgraph is None:
+            mode = get_default_mode()
+            if impl == "py":
+                mode = mode.excluding("cxx")
+            rewriter = mode.optimizer
+
+            # We are cloning fgraph too many times, but one of the existing tests checks for this
+            # TestOpFromGraph.test_outputs_consistency
+            fgraph = self.fgraph.clone()
+            self._wrapped_inputs = [
+                In(inp, borrow=False, mutable=False) for inp in fgraph.inputs
+            ]
+            # These are just temporary because the graph rewirite may change them
+            temp_wrapped_outputs = [
+                Out(out, borrow=True) for out in self.fgraph.outputs
+            ]
+            add_supervisor_to_fgraph(
+                fgraph,
+                self._wrapped_inputs,
+                accept_inplace=False,
+            )
+            rewriter(fgraph)
+            insert_deepcopy(fgraph, self._wrapped_inputs, temp_wrapped_outputs)
+            self._wrapped_outputs = [Out(out, borrow=True) for out in fgraph.outputs]
+            self._prepared_fgraph = fgraph
+
+        return self._prepared_fgraph, self._wrapped_inputs, self._wrapped_outputs
+
     @property
     def fn(self):
-        """Lazily compile the inner function graph."""
         if getattr(self, "_fn", None) is not None:
             return self._fn
 
-        self._fn = function(self.inner_inputs, self.inner_outputs, **self.kwargs)
-        self._fn.trust_input = True
+        fgraph, wrapped_inputs, wrapped_outputs = self._prepare_fgraph(impl=None)
+
+        self._fn = pfunc(
+            wrapped_inputs,
+            wrapped_outputs,
+            mode=Mode(linker=get_default_mode().linker, optimizer=None),
+            accept_inplace=True,
+            on_unused_input="ignore",
+            fgraph=fgraph,
+            trust_input=True,
+        )
 
         return self._fn
 
@@ -870,6 +911,40 @@ class OpFromGraph(Op, HasInnerGraph):
         res = copy(self)
         res.fgraph = res.fgraph.clone()
         return res
+
+    def make_thunk(self, node, storage_map, compute_map, no_recycling, impl=None):
+        from pytensor.link.c.basic import CLinker
+        from pytensor.link.vm import VMLinker
+
+        fg, _, _ = self._prepare_fgraph(impl)
+        fg_no_recycling = [
+            new_o
+            for (new_o, old_o) in zip(fg.outputs, node.outputs, strict=True)
+            if old_o in no_recycling
+        ]
+
+        node_input_storage = [storage_map[r] for r in node.inputs]
+        node_output_storage = [storage_map[r] for r in node.outputs]
+
+        def create_thunk(linker):
+            linker.accept(fg, no_recycling=fg_no_recycling)
+            thunk, i, o = linker.make_thunk(
+                input_storage=node_input_storage,
+                output_storage=node_output_storage,
+            )
+            return thunk
+
+        if impl != "py":
+            try:
+                # We default to CLinker because it generates code for the whole graph that the compiler can reason about.
+                # Whereas the VMLinker will compile each node separately and call them in a pre-defined VM.
+                # It also has less overhead
+                return create_thunk(linker=CLinker())
+            except NotImplementedError:
+                # Some Op doesn't have a C implementation, VM it is
+                return create_thunk(VMLinker(use_cloop=True, c_thunks=True))
+        else:
+            return create_thunk(VMLinker(use_cloop=False, c_thunks=False))
 
     def perform(self, node, inputs, outputs):
         variables = self.fn(*inputs)
