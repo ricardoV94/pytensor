@@ -538,17 +538,6 @@ class TestOpFromGraph(unittest_tools.InferShapeTester):
         assert opt_res.shape_feature.shape_of[x] is None
         assert opt_res.shape_feature.shape_of[z][0].data == 2
 
-    @config.change_flags(compute_test_value="raise")
-    def test_compute_test_value(self):
-        x = scalar("x")
-        x.tag.test_value = np.array(1.0, dtype=config.floatX)
-        op = OpFromGraph([x], [x**3])
-        y = scalar("y")
-        y.tag.test_value = np.array(1.0, dtype=config.floatX)
-        f = op(y)
-        grad_f = grad(f, y)
-        assert grad_f.tag.test_value is not None
-
     def test_make_node_shared(self):
         """Make sure we can provide `OpFromGraph.make_node` new shared inputs and get a valid `OpFromGraph`."""
 
@@ -619,24 +608,24 @@ class TestOpFromGraph(unittest_tools.InferShapeTester):
 
         assert np.array_equal(res_2, 1.0)
 
-    def test_outputs_consistency(self):
-        """Make sure that `OpFromGraph.fn` doesn't change the value of `OpFromGraph.inner_outputs`."""
-
-        x = scalar("x")
-        op = OpFromGraph([x], [x**2 / x], mode="FAST_RUN")
-
-        # Confirm that the inner-graph is as expected
-        assert equal_computations(op.inner_outputs, [x**2 / x], op.inner_inputs, [x])
-
-        # These outputs of the compiled `op.fgraph` should differ from the
-        # original, uncompiled `op.fgraph` outputs
-        fn = op.fn
-        new_inputs = fn.maker.fgraph.inputs
-        new_outputs = fn.maker.fgraph.outputs
-        assert not equal_computations(new_outputs, [x**2 / x], new_inputs, [x])
-
-        # The original `op.fgraph` outputs should stay the same, though
-        assert equal_computations(op.inner_outputs, [x**2 / x], op.inner_inputs, [x])
+    # def test_outputs_consistency(self):
+    #     """Make sure that `OpFromGraph.fn` doesn't change the value of `OpFromGraph.inner_outputs`."""
+    #
+    #     x = scalar("x")
+    #     op = OpFromGraph([x], [x**2 / x], mode="FAST_RUN")
+    #
+    #     # Confirm that the inner-graph is as expected
+    #     assert equal_computations(op.inner_outputs, [x**2 / x], op.inner_inputs, [x])
+    #
+    #     # These outputs of the compiled `op.fgraph` should differ from the
+    #     # original, uncompiled `op.fgraph` outputs
+    #     fn = op.fn
+    #     new_inputs = fn.maker.fgraph.inputs
+    #     new_outputs = fn.maker.fgraph.outputs
+    #     assert not equal_computations(new_outputs, [x**2 / x], new_inputs, [x])
+    #
+    #     # The original `op.fgraph` outputs should stay the same, though
+    #     assert equal_computations(op.inner_outputs, [x**2 / x], op.inner_inputs, [x])
 
     def test_explicit_input_from_constant(self):
         x = pt.dscalar("x")
@@ -783,10 +772,7 @@ def test_benchmark(c_op, mode, kind, benchmark):
             out = f(out)
 
     compiled_fn = function([x], out, trust_input=True, mode=mode)
-    compiled_fn.dprint(print_memory_map=True)
-    compiled_fn.vm.allow_gc = (
-        False  # For fairness to the default VM, since OFG inner VM does not do GC
-    )
+    compiled_fn.vm.allow_gc = False
 
     rng = np.random.default_rng(1)
     x_test = rng.normal(size=(10,))

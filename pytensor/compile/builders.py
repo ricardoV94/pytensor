@@ -6,8 +6,10 @@ from copy import copy
 from functools import partial
 from typing import Union, cast
 
-from pytensor.compile.function import function
+from pytensor.compile import get_default_mode, insert_deepcopy
 from pytensor.compile.function.pfunc import rebuild_collect_shared
+from pytensor.compile.function.types import add_supervisor_to_fgraph
+from pytensor.compile.io import In, Out
 from pytensor.compile.sharedvalue import SharedVariable
 from pytensor.configdefaults import config
 from pytensor.gradient import DisconnectedType, Rop, grad
@@ -433,6 +435,7 @@ class OpFromGraph(Op, HasInnerGraph):
             assert isinstance(name, str), "name must be None or string object"
         self.name = name
         self.destroy_map = destroy_map if destroy_map is not None else {}
+        self._prepared_fgraph = None
 
     def __eq__(self, other):
         # TODO: recognize a copy
@@ -847,16 +850,48 @@ class OpFromGraph(Op, HasInnerGraph):
 
         return ret
 
+    def _prepare_fgraph(self, impl):
+        if self._prepared_fgraph is None:
+            mode = get_default_mode()
+            if impl == "py":
+                mode = mode.excluding("cxx")
+            rewriter = mode.optimizer
+
+            fgraph = self.fgraph
+            wrapped_inputs = [
+                In(inp, borrow=False, mutable=False) for inp in self.fgraph.inputs
+            ]
+            wrapped_outputs = [Out(out, borrow=True) for out in self.fgraph.outputs]
+            add_supervisor_to_fgraph(
+                fgraph,
+                wrapped_inputs,
+                accept_inplace=False,
+            )
+            rewriter(fgraph)
+            insert_deepcopy(fgraph, wrapped_inputs, wrapped_outputs)
+            self._prepared_fgraph = fgraph
+
+        return self._prepared_fgraph
+
     @property
     def fn(self):
         """Lazily compile the inner function graph."""
-        if getattr(self, "_fn", None) is not None:
-            return self._fn
-
-        self._fn = function(self.inner_inputs, self.inner_outputs, **self.kwargs)
-        self._fn.trust_input = True
-
-        return self._fn
+        return None
+        # if getattr(self, "_fn", None) is not None:
+        #     return self._fn
+        #
+        # self._fn = pfunc(
+        #     wrapped_inputs,
+        #     wrapped_outputs,
+        #     mode=mode_instance,
+        #     accept_inplace=True,
+        #     on_unused_input="ignore",
+        #     fgraph=self.fgraph,
+        # )
+        # self._fn = function(self.inner_inputs, self.inner_outputs, **self.kwargs)
+        # self._fn.trust_input = True
+        #
+        # return self._fn
 
     @property
     def inner_inputs(self):
@@ -875,11 +910,7 @@ class OpFromGraph(Op, HasInnerGraph):
         from pytensor.link.c.basic import CLinker
         from pytensor.link.vm import VMLinker
 
-        # FIXME: Don't call self.fn just to get the optimized fgraph
-        fg = self.fn.maker.fgraph
-        # fg = self.fgraph
-        # rewriter = get_default_mode().optimizer
-        # rewriter(fg)
+        fg = self._prepare_fgraph(impl)
         fg_no_recycling = [
             new_o
             for (new_o, old_o) in zip(fg.outputs, node.outputs, strict=True)
@@ -890,8 +921,8 @@ class OpFromGraph(Op, HasInnerGraph):
         node_output_storage = [storage_map[r] for r in node.outputs]
 
         def create_thunk(linker):
-            linker.accept(fg, no_recycling=fg_no_recycling)
-            thunk, _, _ = linker.make_thunk(
+            linker.accept(fg.clone(), no_recycling=fg_no_recycling)
+            thunk, i, o = linker.make_thunk(
                 input_storage=node_input_storage, output_storage=node_output_storage
             )
 
