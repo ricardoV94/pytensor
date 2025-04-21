@@ -907,7 +907,6 @@ class OpFromGraph(Op, HasInnerGraph):
         return res
 
     def make_thunk(self, node, storage_map, compute_map, no_recycling, impl=None):
-        from pytensor.link.c.basic import CLinker
         from pytensor.link.vm import VMLinker
 
         fg = self._prepare_fgraph(impl)
@@ -937,14 +936,14 @@ class OpFromGraph(Op, HasInnerGraph):
             return thunk
 
         if impl != "py":
-            try:
-                # We default to CLinker because it generates code for the whole graph that the compiler can reason about.
-                # Whereas the VMLinker will compile each node separately and call them in a pre-defined VM.
-                # It also has less overhead
-                return create_thunk(linker=CLinker())
-            except NotImplementedError:
-                # Some Op doesn't have a C implementation, VM it is
-                return create_thunk(linker=VMLinker(use_cloop=True, c_thunks=True))
+            # try:
+            #     # We default to CLinker because it generates code for the whole graph that the compiler can reason about.
+            #     # Whereas the VMLinker will compile each node separately and call them in a pre-defined VM.
+            #     # It also has less overhead
+            #     return create_thunk(linker=CLinker())
+            # except NotImplementedError:
+            #     # Some Op doesn't have a C implementation, VM it is
+            return create_thunk(linker=VMLinker(use_cloop=True, c_thunks=True))
         else:
             return create_thunk(VMLinker(use_cloop=False, c_thunks=False))
 
