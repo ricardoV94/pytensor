@@ -1899,7 +1899,8 @@ class NodeProcessingGraphRewriter(GraphRewriter):
         ----------
         fgraph
             A `FunctionGraph`.
-        node
+        node        super().add_requirements(fgraph)
+
             An `Apply` instance in `fgraph`
         node_rewriter
             A `NodeRewriter` instance that may have a better idea for

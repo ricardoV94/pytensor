@@ -586,6 +586,7 @@ def lu(
 
 class PivotToPermutations(Op):
     __props__ = ("inverse",)
+    gufunc_signature = "(x)->(x)"
 
     def __init__(self, inverse=True):
         self.inverse = inverse
@@ -612,8 +613,7 @@ class PivotToPermutations(Op):
 
 
 def pivot_to_permutation(p: TensorLike, inverse=False) -> Variable:
-    p = pt.as_tensor_variable(p)
-    return PivotToPermutations(inverse=inverse)(p)
+    return Blockwise(PivotToPermutations(inverse=inverse))(p)
 
 
 class LUFactor(Op):
