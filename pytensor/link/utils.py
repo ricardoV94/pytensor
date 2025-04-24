@@ -190,9 +190,9 @@ def streamline(
             for x in no_recycling:
                 x[0] = None
             try:
-                # strict=False because we are in a hot loop
+                # strict=None because we are in a hot loop
                 for thunk, node, old_storage in zip(
-                    thunks, order, post_thunk_old_storage, strict=False
+                    thunks, order, post_thunk_old_storage
                 ):
                     thunk()
                     for old_s in old_storage:
@@ -207,7 +207,7 @@ def streamline(
             for x in no_recycling:
                 x[0] = None
             try:
-                # zip strict not specified because we are in a hot loop
+                # strict=None because we are in a hot loop
                 for thunk, node in zip(thunks, order):
                     thunk()
             except Exception:

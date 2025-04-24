@@ -193,7 +193,7 @@ class ScalarLoop(ScalarInnerGraphOp):
             for i in range(n_steps):
                 carry = inner_fn(*carry, *constant)
 
-        # zip strict not specified because we are in a hot loop
+        # strict=None because we are in a hot loop
         for storage, out_val in zip(output_storage, carry):
             storage[0] = out_val
 

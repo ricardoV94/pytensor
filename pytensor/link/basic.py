@@ -379,7 +379,12 @@ class PerformLinker(LocalLinker):
 
         # The function that actually runs your program is one of the f's in streamline.
         f = streamline(
-            fgraph, thunks, order, post_thunk_old_storage, no_recycling=no_recycling
+            fgraph,
+            thunks,
+            order,
+            post_thunk_old_storage=post_thunk_old_storage,
+            no_recycling=no_recycling,
+            output_storage=output_storage,
         )
 
         f.allow_gc = (
@@ -545,13 +550,13 @@ class WrapLinker(Linker):
 
         def f():
             for inputs in input_lists[1:]:
-                # zip strict not specified because we are in a hot loop
+                # strict=None because we are in a hot loop
                 for input1, input2 in zip(inputs0, inputs):
                     input2.storage[0] = copy(input1.storage[0])
             for x in to_reset:
                 x[0] = None
             pre(self, [input.data for input in input_lists[0]], order, thunk_groups)
-            # zip strict not specified because we are in a hot loop
+            # strict=None because we are in a hot loop
             for i, (thunks, node) in enumerate(zip(thunk_groups, order)):
                 try:
                     wrapper(self.fgraph, i, node, *thunks)
@@ -679,7 +684,7 @@ class JITLinker(PerformLinker):
                     #  since the error may come from any of them?
                     raise_with_op(self.fgraph, output_nodes[0], thunk)
 
-                # zip strict not specified because we are in a hot loop
+                # strict=None because we are in a hot loop
                 for o_storage, o_val in zip(thunk_outputs, outputs):
                     o_storage[0] = o_val
 

@@ -4312,7 +4312,7 @@ class Composite(ScalarInnerGraphOp):
 
     def perform(self, node, inputs, output_storage):
         outputs = self.py_perform_fn(*inputs)
-        # zip strict not specified because we are in a hot loop
+        # strict=None because we are in a hot loop
         for storage, out_val in zip(output_storage, outputs):
             storage[0] = out_val
 
