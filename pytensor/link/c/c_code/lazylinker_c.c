@@ -317,7 +317,16 @@ static int CLazyLinker_init(CLazyLinker *self, PyObject *args, PyObject *kwds) {
     for (int i = 0; i < n_applies; ++i) {
       PyObject *thunk = PyList_GetItem(self->thunks, i);
       // thunk is borrowed
-      if (PyObject_HasAttrString(thunk, "cthunk")) {
+      if (PyObject_HasAttrString(thunk, "cvmthunk")) {
+        PyObject *cthunk = PyObject_GetAttrString(thunk, "cvmthunk");
+        // new reference
+        assert(cthunk && NpyCapsule_Check(cthunk));
+        self->thunk_cptr_fn[i] = PyCapsule_GetContext(cthunk);
+        self->thunk_cptr_data[i] = PyCapsule_GetPointer(cthunk, "CLazyLinkerCThunk");
+        Py_DECREF(cthunk);
+        // cthunk is kept alive by membership in self->thunks
+      }
+      else if (PyObject_HasAttrString(thunk, "cthunk")) {
         PyObject *cthunk = PyObject_GetAttrString(thunk, "cthunk");
         // new reference
         assert(cthunk && NpyCapsule_Check(cthunk));
@@ -676,20 +685,21 @@ static int lazy_rec_eval(CLazyLinker *self, Py_ssize_t var_idx, PyObject *one,
       // rval is new ref
       if (rval) // pycall returned normally (no exception)
       {
-        if (rval == Py_None) {
-          Py_DECREF(rval); // ignore a return of None
-        } else if (PyList_Check(rval)) {
-          PyErr_SetString(PyExc_TypeError,
-                          "non-lazy thunk should return None, not list");
-          err = 1;
-          goto pyfail;
-        } else // don't know what it returned, but it wasn't right.
-        {
-          PyErr_SetObject(PyExc_TypeError, rval);
-          err = 1;
-          // We don't release rval since we put it in the error above
-          goto fail;
-        }
+          Py_DECREF(rval); // ignore the return
+//        if (rval == Py_None) {
+//          Py_DECREF(rval); // ignore a return of None
+//        } else if (PyList_Check(rval)) {
+//          PyErr_SetString(PyExc_TypeError,
+//                          "non-lazy thunk should return None, not list");
+//          err = 1;
+//          goto pyfail;
+//        } else // don't know what it returned, but it wasn't right.
+//        {
+//          PyErr_SetObject(PyExc_TypeError, rval);
+//          err = 1;
+//          // We don't release rval since we put it in the error above
+//          goto fail;
+//        }
       } else // pycall returned NULL (internal error)
       {
         err = 1;
@@ -886,14 +896,79 @@ static PyObject *CLazyLinker_call(PyObject *_self, PyObject *args,
   return rval;
 }
 
-#if 0
+// Struct for thunk data
+typedef struct {
+    PyObject *lazylinker_obj;
+    PyObject *empty_args;
+    PyObject *empty_kwargs;
+} CLazyLinkerCThunk;
+
+// Thunk function: receives struct pointer
+static int lazylinker_cthunk_fn(void *data) {\
+    CLazyLinkerCThunk *p = (CLazyLinkerCThunk *)data;
+    PyObject *result = CLazyLinker_call(p->lazylinker_obj, p->empty_args, p->empty_kwargs);
+    if (!result){
+      return 1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+// Capsule destructor
+static void lazylinker_cthunk_free(PyObject *capsule) {
+    // Get the pointer stored in the capsule
+    CLazyLinkerCThunk *p = (CLazyLinkerCThunk *)PyCapsule_GetPointer(capsule, "CLazyLinkerCThunk");
+    if (p) {
+        Py_XDECREF(p->lazylinker_obj);
+        Py_XDECREF(p->empty_args);
+        Py_XDECREF(p->empty_kwargs);
+        free(p);
+    }
+}
+
+// Factory: returns capsule with struct pointer
+static PyObject *CLazyLinker_make_cthunk(CLazyLinker *self, PyObject *args) {
+    CLazyLinkerCThunk *cthunk_data = (CLazyLinkerCThunk *)malloc(sizeof(CLazyLinkerCThunk));
+    if (!cthunk_data) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    cthunk_data->lazylinker_obj = (PyObject *)self;
+    Py_INCREF(cthunk_data->lazylinker_obj);
+    cthunk_data->empty_args = PyTuple_New(0);
+    cthunk_data->empty_kwargs = PyDict_New();
+
+    PyObject *capsule = PyCapsule_New(
+        (void*)cthunk_data,  // Store struct pointer as main pointer
+        "CLazyLinkerCThunk",
+        lazylinker_cthunk_free
+    );
+    if (!capsule) {
+        Py_XDECREF(cthunk_data->lazylinker_obj);
+        Py_XDECREF(cthunk_data->empty_args);
+        Py_XDECREF(cthunk_data->empty_kwargs);
+        free(cthunk_data);
+        return NULL;
+    }
+
+    // Set the function pointer as the context
+    if (PyCapsule_SetContext(capsule, (void*)lazylinker_cthunk_fn) != 0) {
+        Py_DECREF(capsule);
+        Py_XDECREF(cthunk_data->lazylinker_obj);
+        Py_XDECREF(cthunk_data->empty_args);
+        Py_XDECREF(cthunk_data->empty_kwargs);
+        free(cthunk_data);
+        return NULL;
+    }
+    return capsule;
+}
+
+
 static PyMethodDef CLazyLinker_methods[] = {
-    {
-      //"name", (PyCFunction)CLazyLinker_accept, METH_VARARGS, "Return the name, combining the first and last name"
-    },
+    {"make_cthunk", (PyCFunction)CLazyLinker_make_cthunk, METH_NOARGS,
+     "Return a CThunk capsule that can be used to call this CLazyLinker from C"},
     {NULL}  /* Sentinel */
 };
-#endif
 
 static PyObject *CLazyLinker_get_allow_gc(CLazyLinker *self, void *closure) {
   return PyBool_FromLong(self->allow_gc);
@@ -967,7 +1042,7 @@ static PyTypeObject lazylinker_ext_CLazyLinkerType = {
     0,                                        /* tp_weaklistoffset */
     0,                                        /* tp_iter */
     0,                                        /* tp_iternext */
-    0,                          // CLazyLinker_methods,       /* tp_methods */
+    CLazyLinker_methods,       /* tp_methods */
     CLazyLinker_members,        /* tp_members */
     CLazyLinker_getset,         /* tp_getset */
     0,                          /* tp_base */

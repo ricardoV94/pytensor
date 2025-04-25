@@ -13,7 +13,7 @@ from pytensor.link.c.cmodule import GCC_compiler
 
 _logger = logging.getLogger(__file__)
 
-force_compile = False
+force_compile = True
 version = 0.3  # must match constant returned in function get_version()
 lazylinker_ext: ModuleType | None = None
 

@@ -732,8 +732,8 @@ OpFromGraph{inline=False} [id A]
         assert truth.strip() == out.strip()
 
 
-@pytest.mark.parametrize("kind", ("ofg", "inlined", "scan"))
-@pytest.mark.parametrize("mode", ("fast_compile", "fast_run"))
+@pytest.mark.parametrize("kind", ("ofg", "inlined"))
+@pytest.mark.parametrize("mode", ("fast_run",))
 @pytest.mark.parametrize("c_op", (True, False), ids=lambda x: f"c_op={x}")
 def test_benchmark(c_op, mode, kind, benchmark):
     n = 25

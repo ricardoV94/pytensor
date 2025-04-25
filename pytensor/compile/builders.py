@@ -7,9 +7,10 @@ from functools import partial
 from typing import Union, cast
 
 from pytensor.compile import get_default_mode, insert_deepcopy
-from pytensor.compile.function.pfunc import rebuild_collect_shared
+from pytensor.compile.function.pfunc import rebuild_collect_shared, pfunc
 from pytensor.compile.function.types import add_supervisor_to_fgraph
 from pytensor.compile.io import In, Out
+from pytensor.compile.mode import Mode
 from pytensor.compile.sharedvalue import SharedVariable
 from pytensor.configdefaults import config
 from pytensor.gradient import DisconnectedType, Rop, grad
@@ -26,6 +27,7 @@ from pytensor.graph.null_type import NullType
 from pytensor.graph.op import HasInnerGraph, Op
 from pytensor.graph.replace import clone_replace
 from pytensor.graph.utils import MissingInputError
+from pytensor.link.c.basic import CLinker
 
 
 def infer_shape(outs, inputs, input_shapes):
@@ -858,40 +860,39 @@ class OpFromGraph(Op, HasInnerGraph):
             rewriter = mode.optimizer
 
             fgraph = self.fgraph
-            wrapped_inputs = [
+            self.wrapped_inputs = [
                 In(inp, borrow=False, mutable=False) for inp in self.fgraph.inputs
             ]
-            wrapped_outputs = [Out(out, borrow=True) for out in self.fgraph.outputs]
+            self.wrapped_outputs = [Out(out, borrow=True) for out in self.fgraph.outputs]
             add_supervisor_to_fgraph(
                 fgraph,
-                wrapped_inputs,
+                self.wrapped_inputs,
                 accept_inplace=False,
             )
             rewriter(fgraph)
-            insert_deepcopy(fgraph, wrapped_inputs, wrapped_outputs)
+            insert_deepcopy(fgraph, self.wrapped_inputs, self.wrapped_outputs)
             self._prepared_fgraph = fgraph
 
-        return self._prepared_fgraph
+        return self._prepared_fgraph, self.wrapped_inputs, self.wrapped_outputs
 
     @property
     def fn(self):
-        """Lazily compile the inner function graph."""
-        return None
-        # if getattr(self, "_fn", None) is not None:
-        #     return self._fn
-        #
-        # self._fn = pfunc(
-        #     wrapped_inputs,
-        #     wrapped_outputs,
-        #     mode=mode_instance,
-        #     accept_inplace=True,
-        #     on_unused_input="ignore",
-        #     fgraph=self.fgraph,
-        # )
-        # self._fn = function(self.inner_inputs, self.inner_outputs, **self.kwargs)
-        # self._fn.trust_input = True
-        #
-        # return self._fn
+        if getattr(self, "_fn", None) is not None:
+            return self._fn
+
+        fgraph, wrapped_inputs, wrapped_outputs = self._prepare_fgraph(impl=None)
+
+        self._fn = pfunc(
+            wrapped_inputs,
+            wrapped_outputs,
+            mode=Mode(linker=get_default_mode().linker, optimizer=None),
+            accept_inplace=True,
+            on_unused_input="ignore",
+            fgraph=self.fgraph,
+            trust_input=True,
+        )
+
+        return self._fn
 
     @property
     def inner_inputs(self):
@@ -909,7 +910,7 @@ class OpFromGraph(Op, HasInnerGraph):
     def make_thunk(self, node, storage_map, compute_map, no_recycling, impl=None):
         from pytensor.link.vm import VMLinker
 
-        fg = self._prepare_fgraph(impl)
+        fg, _, _ = self._prepare_fgraph(impl)
         fg_no_recycling = [
             new_o
             for (new_o, old_o) in zip(fg.outputs, node.outputs, strict=True)
@@ -926,24 +927,31 @@ class OpFromGraph(Op, HasInnerGraph):
             )
 
             if isinstance(linker, VMLinker):
-                # VMs will complain if a non-lazy thunk returns anything
-                # We wrap it in a function that returns None
-                def thunk_without_returns():
-                    thunk()
+                # It's actually a VM, if it's a CVM we can get a CThunk that can be called from another CVM
+                if 1 and linker.use_cloop and linker.c_thunks:
+                    cthunk = linker.make_cthunk(thunk)
+                    return cthunk
 
-                return thunk_without_returns
+                # else:
+                #     # Otherwise we need to wrap it an a function that returns no outputs since the
+                #     # LazyLinker complains if a non-lazy thunk returns anything
+                #
+                #     def thunk_without_returns():
+                #         thunk()
+                #
+                #     return thunk_without_returns
 
             return thunk
 
         if impl != "py":
-            # try:
-            #     # We default to CLinker because it generates code for the whole graph that the compiler can reason about.
-            #     # Whereas the VMLinker will compile each node separately and call them in a pre-defined VM.
-            #     # It also has less overhead
-            #     return create_thunk(linker=CLinker())
-            # except NotImplementedError:
-            #     # Some Op doesn't have a C implementation, VM it is
-            return create_thunk(linker=VMLinker(use_cloop=True, c_thunks=True))
+            try:
+                # We default to CLinker because it generates code for the whole graph that the compiler can reason about.
+                # Whereas the VMLinker will compile each node separately and call them in a pre-defined VM.
+                # It also has less overhead
+                return create_thunk(linker=CLinker())
+            except NotImplementedError:
+                # Some Op doesn't have a C implementation, VM it is
+                return create_thunk(linker=VMLinker(use_cloop=True, c_thunks=True))
         else:
             return create_thunk(VMLinker(use_cloop=False, c_thunks=False))
 

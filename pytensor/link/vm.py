@@ -777,6 +777,12 @@ class Stack(UpdatingVM):
         return self.perform_updates()
 
 
+class CVMThunk:
+
+    def __init__(self, cthunk):
+        self.cvmthunk = cthunk
+
+
 class VMLinker(LocalLinker):
     """Class that satisfies the `Linker` interface by acting as a `VM` factory.
 
@@ -1310,6 +1316,17 @@ class VMLinker(LocalLinker):
             thunks,
             order,
         )
+
+    def make_cthunk(self, thunk):
+        # Wrap a CVM in a cthunk so it can be called from anoter CVM directly
+        from pytensor.link.c.cvm import CVM
+        from pytensor.link.c.basic import _CThunk
+
+        if not isinstance(thunk, CVM):
+            raise ValueError("Only CVM thunks can be converted into cthunks")
+
+        cthunk = thunk.make_cthunk()
+        return CVMThunk(cthunk)
 
     def __setstate__(self, d):
         self.__dict__.update(d)
