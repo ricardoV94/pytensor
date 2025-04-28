@@ -24,7 +24,7 @@ from pytensor.graph.basic import (
 )
 from pytensor.graph.fg import FunctionGraph
 from pytensor.graph.null_type import NullType
-from pytensor.graph.op import HasInnerGraph, Op
+from pytensor.graph.op import HasInnerGraph, Op, StorageMapType, ComputeMapType
 from pytensor.graph.replace import clone_replace
 from pytensor.graph.utils import MissingInputError
 
@@ -436,7 +436,9 @@ class OpFromGraph(Op, HasInnerGraph):
             assert isinstance(name, str), "name must be None or string object"
         self.name = name
         self.destroy_map = destroy_map if destroy_map is not None else {}
-        self._prepared_fgraph = None
+        self._rewritten_fgraph = {}
+        self._wrapped_inputs = {}
+        self._wrapped_outputs = {}
 
     def __eq__(self, other):
         # TODO: recognize a copy
@@ -851,8 +853,8 @@ class OpFromGraph(Op, HasInnerGraph):
 
         return ret
 
-    def _prepare_fgraph(self, impl):
-        if self._prepared_fgraph is None:
+    def _rewrite_fgraph(self, impl):
+        if self._rewritten_fgraph.get(impl, None) is None:
             mode = get_default_mode()
             if impl == "py":
                 mode = mode.excluding("cxx")
@@ -861,7 +863,7 @@ class OpFromGraph(Op, HasInnerGraph):
             # We are cloning fgraph too many times, but one of the existing tests checks for this
             # TestOpFromGraph.test_outputs_consistency
             fgraph = self.fgraph.clone()
-            self._wrapped_inputs = [
+            self._wrapped_inputs[impl] = temp_wrapped_inputs = [
                 In(inp, borrow=False, mutable=False) for inp in fgraph.inputs
             ]
             # These are just temporary because the graph rewirite may change them
@@ -870,22 +872,23 @@ class OpFromGraph(Op, HasInnerGraph):
             ]
             add_supervisor_to_fgraph(
                 fgraph,
-                self._wrapped_inputs,
+                temp_wrapped_inputs,
                 accept_inplace=False,
             )
-            rewriter(fgraph)
-            insert_deepcopy(fgraph, self._wrapped_inputs, temp_wrapped_outputs)
-            self._wrapped_outputs = [Out(out, borrow=True) for out in fgraph.outputs]
-            self._prepared_fgraph = fgraph
+            with config.change_flags(compute_test_value="off"):
+                rewriter(fgraph)
+            insert_deepcopy(fgraph, temp_wrapped_inputs, temp_wrapped_outputs)
+            self._wrapped_outputs[impl] = [Out(out, borrow=True) for out in fgraph.outputs]
+            self._rewritten_fgraph[impl] = fgraph
 
-        return self._prepared_fgraph, self._wrapped_inputs, self._wrapped_outputs
+        return self._rewritten_fgraph[impl], self._wrapped_inputs[impl], self._wrapped_outputs[impl]
 
     @property
     def fn(self):
         if getattr(self, "_fn", None) is not None:
             return self._fn
 
-        fgraph, wrapped_inputs, wrapped_outputs = self._prepare_fgraph(impl=None)
+        fgraph, wrapped_inputs, wrapped_outputs = self._rewrite_fgraph(impl=None)
 
         self._fn = pfunc(
             wrapped_inputs,
@@ -912,10 +915,20 @@ class OpFromGraph(Op, HasInnerGraph):
         res.fgraph = res.fgraph.clone()
         return res
 
+    def prepare_node(
+        self,
+        node: Apply,
+        storage_map: StorageMapType | None,
+        compute_map: ComputeMapType | None,
+        impl: str | None,
+    ) -> None:
+        self._rewrite_fgraph(impl)
+        self.fn
+
     def make_thunk(self, node, storage_map, compute_map, no_recycling, impl=None):
         from pytensor.link.vm import VMLinker
 
-        fg, _, _ = self._prepare_fgraph(impl)
+        fg, _, _ = self._rewrite_fgraph(impl)
         fg_no_recycling = [
             new_o
             for (new_o, old_o) in zip(fg.outputs, node.outputs, strict=True)
@@ -924,14 +937,21 @@ class OpFromGraph(Op, HasInnerGraph):
 
         node_input_storage = [storage_map[r] for r in node.inputs]
         node_output_storage = [storage_map[r] for r in node.outputs]
+        node_compute_map = [compute_map[r] for r in node.outputs]
 
         def create_thunk(linker):
             linker.accept(fg, no_recycling=fg_no_recycling)
-            thunk, i, o = linker.make_thunk(
+            thunk, _, _ = linker.make_thunk(
                 input_storage=node_input_storage,
                 output_storage=node_output_storage,
             )
             return thunk
+            def thunk_wrapper(thunk=thunk, node_compute_map=node_compute_map):
+                thunk()
+                for cm in node_compute_map:
+                    cm[0] = True
+
+            return thunk_wrapper
 
         if impl != "py":
             # try:

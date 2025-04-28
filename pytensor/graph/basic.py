@@ -895,7 +895,7 @@ def walk(
 
 
 def ancestors(
-    graphs: Iterable[Variable], blockers: Collection[Variable] | None = None
+    graphs: Iterable[Variable], blockers: Collection[Variable] | None = None, bfs: bool = False
 ) -> Generator[Variable, None, None]:
     r"""Return the variables that contribute to those in given graphs (inclusive).
 
@@ -921,7 +921,7 @@ def ancestors(
             return reversed(r.owner.inputs)
         return None
 
-    yield from cast(Generator[Variable, None, None], walk(graphs, expand, False))
+    yield from cast(Generator[Variable, None, None], walk(graphs, expand, bfs))
 
 
 def graph_inputs(

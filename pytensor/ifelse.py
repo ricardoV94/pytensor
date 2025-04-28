@@ -10,7 +10,8 @@ which value to report. Note also that `switch` is an elemwise operation (so
 it picks each entry of a matrix according to the condition) while `ifelse`
 is a global operation with a scalar condition.
 """
-
+import queue
+from collections import deque
 from collections.abc import Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
@@ -21,8 +22,8 @@ import pytensor.tensor as pt
 from pytensor import as_symbolic
 from pytensor.compile import optdb
 from pytensor.configdefaults import config
-from pytensor.graph.basic import Apply, Variable, apply_depends_on
-from pytensor.graph.op import _NoPythonOp
+from pytensor.graph.basic import Apply, Variable, apply_depends_on, ancestors, truncated_graph_inputs
+from pytensor.graph.op import _NoPythonOp, Op
 from pytensor.graph.replace import clone_replace
 from pytensor.graph.rewriting.basic import GraphRewriter, in2out, node_rewriter
 from pytensor.graph.type import HasDataType, HasShape
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from pytensor.tensor import TensorLike
 
 
-class IfElse(_NoPythonOp):
+class IfElse(Op):
     r"""An `Op` that provides conditional graph evaluation.
 
     According to a scalar condition, this `Op` evaluates and then
@@ -76,18 +77,6 @@ class IfElse(_NoPythonOp):
         self.as_view = as_view
         self.n_outs = n_outs
         self.name = name
-
-    def __eq__(self, other):
-        if type(self) is not type(other):
-            return False
-        if self.as_view != other.as_view:
-            return False
-        if self.n_outs != other.n_outs:
-            return False
-        return True
-
-    def __hash__(self):
-        return hash((type(self), self.as_view, self.n_outs))
 
     def __str__(self):
         args = []
@@ -285,65 +274,49 @@ class IfElse(_NoPythonOp):
             *if_false_op(*inputs_false_grad, return_list=True),
         ]
 
-    def make_thunk(self, node, storage_map, compute_map, no_recycling, impl=None):
-        cond = node.inputs[0]
-        input_true_branch = node.inputs[1:][: self.n_outs]
-        inputs_false_branch = node.inputs[1:][self.n_outs :]
-        outputs = node.outputs
+    def perform(self, node, inputs, output_storage):
+        cond = inputs[0]
+        if cond:
+            outputs = inputs[1: self.n_outs]
+        else:
+            outputs = inputs[1 + self.n_outs:]
+        for output_storage, output in zip(output_storage, outputs):
+            output_storage[0] = output
 
-        def thunk():
-            if not compute_map[cond][0]:
-                return [0]
-            else:
-                truthval = storage_map[cond][0]
-                if truthval != 0:
-                    ls = [
-                        idx + 1
-                        for idx in range(self.n_outs)
-                        if not compute_map[input_true_branch[idx]][0]
-                    ]
-                    if len(ls) > 0:
-                        return ls
-                    else:
-                        # strict=False because we are in a hot loop
-                        for out, t in zip(outputs, input_true_branch, strict=False):
-                            compute_map[out][0] = 1
-                            val = storage_map[t][0]
-                            if self.as_view:
-                                storage_map[out][0] = val
-                            # Work around broken numpy deepcopy
-                            elif isinstance(val, np.ndarray | np.memmap):
-                                storage_map[out][0] = val.copy()
-                            else:
-                                storage_map[out][0] = deepcopy(val)
-                        return []
-                else:
-                    ls = [
-                        1 + idx + self.n_outs
-                        for idx in range(self.n_outs)
-                        if not compute_map[inputs_false_branch[idx]][0]
-                    ]
-                    if len(ls) > 0:
-                        return ls
-                    else:
-                        # strict=False because we are in a hot loop
-                        for out, f in zip(outputs, inputs_false_branch, strict=False):
-                            compute_map[out][0] = 1
-                            # can't view both outputs unless destroyhandler
-                            # improves
-                            # Work around broken numpy deepcopy
-                            val = storage_map[f][0]
-                            if isinstance(val, np.ndarray | np.memmap):
-                                storage_map[out][0] = val.copy()
-                            else:
-                                storage_map[out][0] = deepcopy(val)
-                        return []
 
-        thunk.lazy = True
-        thunk.inputs = [storage_map[v] for v in node.inputs]
-        thunk.outputs = [storage_map[v] for v in node.outputs]
-        return thunk
+class LazyIfElse(Op):
+    def __init__(self, inputs, true_outputs, false_outputs):
+        self.inputs = inputs
+        self.true_outputs = true_outputs
+        self.false_outputs = false_outputs
+        assert len(true_outputs) == len(false_outputs)
 
+    def make_node(self, *inputs: Variable) -> Apply:
+        return Apply(self, inputs, [i.type() for i in inputs[1:len(self.true_outputs)+1]])
+
+    @property
+    def true_fn(self):
+        from pytensor import function
+        # TODO: Avoid function overhead like OpFromGraph does
+        if self._true_fn is None:
+            self._true_fn = function(self.inputs, self.true_outputs, on_unused_input="ignore")
+        return self._true_fn
+
+    @property
+    def false_fn(self):
+        from pytensor import function
+        if self._false_fn is None:
+            self._false_fn = function(self.inputs, self.false_outputs)
+        return self._false_fn
+
+    def perform(self, node, inputs, output_storage):
+        cond, *fn_inputs = inputs
+        if cond:
+            outputs = self.true_fn(*fn_inputs)
+        else:
+            outputs = self.false_fn(*fn_inputs)
+        for output_storage, output in zip(output_storage, outputs):
+            output_storage[0] = output
 
 def ifelse(
     condition: "TensorLike",
@@ -502,8 +475,6 @@ def ifelse_lift_single_if_through_acceptable_ops(fgraph, main_node):
     if `op` is in the `acceptable_ops` list, and there is no other if as
     input to that specific `op`, and the if has no other clients !?
     """
-    if not (isinstance(main_node.op, acceptable_ops)):
-        return False
     all_inp_nodes = set()
     for inp in main_node.inputs:
         all_inp_nodes.add(inp.owner)
@@ -543,8 +514,6 @@ def ifelse_lift_single_if_through_acceptable_ops(fgraph, main_node):
 @node_rewriter([IfElse])
 def cond_merge_ifs_true(fgraph, node):
     op = node.op
-    if not isinstance(op, IfElse):
-        return False
     t_ins = node.inputs[1:][: op.n_outs]
 
     replace = {}
@@ -570,8 +539,6 @@ def cond_merge_ifs_true(fgraph, node):
 @node_rewriter([IfElse])
 def cond_merge_ifs_false(fgraph, node):
     op = node.op
-    if not isinstance(op, IfElse):
-        return False
     f_ins = node.inputs[1:][op.n_outs :]
 
     replace = {}
@@ -745,6 +712,59 @@ def cond_merge_random_op(fgraph, main_node):
             main_outs = clone_replace(main_node.outputs, replace=pairs)
             return main_outs
 
+
+@node_rewriter([IfElse])
+def make_ifelse_lazy(fgraph, node):
+    # Convert a standard ifelse to the lazy counterpart with two inner functions, for the true and false branches
+    op: IfElse = node.op
+    cond, true_outputs, false_outputs = node.inputs[0], node.inputs[1:op.n_outs + 1], node.inputs[op.n_outs + 1:]
+    toposort = reversed(fgraph.toposort())
+    clients = fgraph.clients
+
+    def get_lazy_branch_inputs(outputs):
+        inputs = []
+        graph_ancestors = set(ancestors(true_outputs))
+        excluded_ancestors = set()
+        sorted_ancestor_nodes = deque(node for node in toposort if any(out in graph_ancestors for out in node.outputs))
+
+        while sorted_ancestor_nodes:
+            a_node = sorted_ancestor_nodes.popleft()
+
+            if any(out in excluded_ancestors for out in a_node.outputs):
+                continue
+
+            for out in a_node.outputs:
+                for client, _ in clients[out]:
+                    if client is node:
+                        continue
+                    for client_out in client.outputs:
+                        if client_out not in graph_ancestors:
+                            # This variable is used outside the true branch, it should not be part o the inner graph
+                            for inp in a_node.inputs:
+                                if inp not in inputs:
+                                    inputs.append(inp)
+                            excluded_ancestors.update(ancestors(a_node.inputs))
+                            break
+
+
+        return truncated_graph_inputs(outputs, inputs)
+
+    all_inputs = []
+    for inp in (*get_lazy_branch_inputs(true_outputs), *get_lazy_branch_inputs(false_outputs)):
+        if inp not in all_inputs:
+            all_inputs.append(inp)
+
+    op = LazyIfElse(all_inputs, true_outputs, false_outputs)
+    outputs = op(cond, *all_inputs, return_list=True)
+    return outputs
+
+
+optdb.register(
+    make_ifelse_lazy.__name__,
+    in2out(make_ifelse_lazy, ignore_newtrees=True),
+    "fast_run",
+    position=90,  # TODO: Think about this one
+)
 
 # XXX: Optimizations commented pending further debugging (certain optimizations
 # make computation less lazy than it should be currently).

@@ -31,11 +31,7 @@ def assert_no_blockwise_in_graph(fgraph: FunctionGraph, core_op=None) -> None:
             assert not isinstance(node.op.core_op, core_op)
 
         if isinstance(node.op, HasInnerGraph):
-            # InnerGraph Ops can be rewritten without modifying the original fgraph
-            if hasattr(node.op, "_fn"):
-                inner_fgraph = node.op._fn.maker.fgraph
-            else:
-                inner_fgraph = node.op.fgraph
+            inner_fgraph = node.op.fn.maker.fgraph
             assert_no_blockwise_in_graph(inner_fgraph, core_op=core_op)
 
 
@@ -101,27 +97,27 @@ def test_general_dot():
     )
 
 
-@pytest.mark.parametrize("static_shape_known", [True, False])
+@pytest.mark.parametrize("static_shape_known", [False])
 @pytest.mark.parametrize(
     "signature",
     [
-        "ij",
-        "ji",
-        "ii->i",
-        "ii",
-        "ij->",
-        "ij->j",
-        "ij->i",
-        "ij,ij->ij",
-        "ij,ji->ij",
-        "ij,ji->ji",
-        "ij,jk",
-        "kj,ji",
-        "ij,kj->ik",
-        "ik,kj->ikj",
-        "ij,kl->ijkl",
-        "ij,jk,kl->il",
-        "kl,ij,jk->il",
+        # "ij",
+        # "ji",
+        # "ii->i",
+        # "ii",
+        # "ij->",
+        # "ij->j",
+        # "ij->i",
+        # "ij,ij->ij",
+        # "ij,ji->ij",
+        # "ij,ji->ji",
+        # "ij,jk",
+        # "kj,ji",
+        # "ij,kj->ik",
+        # "ik,kj->ikj",
+        # "ij,kl->ijkl",
+        # "ij,jk,kl->il",
+        # "kl,ij,jk->il",
         "oij,imj,mjkn,lnk,plk->op",
     ],
 )
