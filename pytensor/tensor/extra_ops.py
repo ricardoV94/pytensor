@@ -417,8 +417,10 @@ class CumOp(COp):
                     printf("%f ", *(double *)PyArray_GETPTR1({z}, i));
                 }}
 
-                if (!{z})
+                if (!{z}){{
                     {fail};
+                }}
+
                 {{
 
                     PyObject * t = NULL;
@@ -433,6 +435,10 @@ class CumOp(COp):
 
                     if (!t){{
                        {fail};
+                    }}
+                    printf("t contents: ");
+                    for (npy_intp i = 0; i < PyArray_SIZE((PyArrayObject*)t); ++i) {{
+                        printf("%f ", *(double *)PyArray_GETPTR1((PyArrayObject*)t, i));
                     }}
                     // Because PyArray_CumSum/CumProd returns a newly created reference on t.
                     Py_XDECREF(t);

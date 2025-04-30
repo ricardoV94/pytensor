@@ -527,7 +527,7 @@ class BlockwiseWithCoreShape(OpWithCoreShape, COp):
             {core_c_code}
         }}
         
-        PyArray_CopyInto(orig_{out}_i, {out}_i);
+        //PyArray_CopyInto(orig_{out}_i, {out}_i);
         
         """
         print(code)
