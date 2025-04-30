@@ -3,11 +3,12 @@ from functools import partial
 import numpy as np
 import pytest
 from scipy.signal import convolve as scipy_convolve
+from threadpoolctl import threadpool_limits
 
 from pytensor import config, function, grad
 from pytensor.graph.basic import ancestors, io_toposort
 from pytensor.graph.rewriting import rewrite_graph
-from pytensor.tensor import matrix, vector
+from pytensor.tensor import matrix, tensor, vector
 from pytensor.tensor.blockwise import Blockwise
 from pytensor.tensor.signal.conv import Convolve1d, convolve1d
 from tests import unittest_tools as utt
@@ -109,3 +110,40 @@ def test_convolve1d_valid_grad_rewrite(static_shape):
         if isinstance(node.op, Convolve1d)
     ]
     assert conv_op.mode == ("valid" if static_shape else "full")
+
+
+def convolve1d_benchmark_tester(compile_mode, batch, mode, benchmark):
+    x = tensor(
+        shape=(
+            7,
+            183,
+        )
+        if batch
+        else (183,)
+    )
+    y = tensor(shape=(7, 6) if batch else (6,))
+    out = convolve1d(x, y, mode=mode)
+    fn = function([x, y], out, mode=compile_mode, trust_input=True)
+
+    rng = np.random.default_rng()
+    x_test = rng.normal(size=(x.type.shape)).astype(x.type.dtype)
+    y_test = rng.normal(size=(y.type.shape)).astype(y.type.dtype)
+
+    np_convolve1d = np.vectorize(
+        partial(np.convolve, mode=mode), signature="(x),(y)->(z)"
+    )
+
+    np.testing.assert_allclose(
+        fn(x_test, y_test),
+        np_convolve1d(x_test, y_test),
+    )
+    benchmark(fn, x_test, y_test)
+
+
+@pytest.mark.parametrize("mode", ("full", "valid"), ids=lambda x: f"mode={x}")
+@pytest.mark.parametrize("batch", (False, True), ids=lambda x: f"batch={x}")
+def test_convolve1d_benchmark_c(batch, mode, benchmark):
+    with threadpool_limits(limits=1):
+        convolve1d_benchmark_tester(
+            compile_mode="FAST_RUN", batch=batch, mode=mode, benchmark=benchmark
+        )

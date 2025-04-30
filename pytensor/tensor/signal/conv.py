@@ -1,13 +1,15 @@
+from collections.abc import Hashable
 from typing import TYPE_CHECKING, Literal, cast
 
 from numpy import convolve as numpy_convolve
 
-from pytensor.graph import Apply, Op
+from pytensor.graph import Apply
+from pytensor.link.c.op import COp
 from pytensor.scalar.basic import upcast
 from pytensor.tensor.basic import as_tensor_variable, join, zeros
 from pytensor.tensor.blockwise import Blockwise
 from pytensor.tensor.math import maximum, minimum
-from pytensor.tensor.type import vector
+from pytensor.tensor.type import complex_dtypes, vector
 from pytensor.tensor.variable import TensorVariable
 
 
@@ -15,7 +17,7 @@ if TYPE_CHECKING:
     from pytensor.tensor import TensorLike
 
 
-class Convolve1d(Op):
+class Convolve1d(COp):
     __props__ = ("mode",)
     gufunc_signature = "(n),(k)->(o)"
 
@@ -85,6 +87,59 @@ class Convolve1d(Op):
             in2_bar = in2_bar[nmk : in2_bar.shape[0] - nmk]
 
         return [in1_bar, in2_bar]
+
+    def c_code(self, node, name, inputs, outputs, sub):
+        raise NotImplementedError
+        in1, in2 = inputs
+        if any(inp.type.dtype in complex_dtypes for inp in node.inputs):
+            raise NotImplementedError
+        [out] = outputs
+        fail = sub["fail"]
+
+        mode = 2 if self.mode == "full" else 0
+        return f"""
+        Py_XDECREF({out});
+        
+        PyArrayObject *in1 = (PyArrayObject*){in1};
+        PyArrayObject *in2 = (PyArrayObject*){in2};
+        // Numpy correlate swaps inputs
+        if (PyArray_SHAPE(in1)[0] < PyArray_SHAPE(in2)[0]){{
+            in1 = (PyArrayObject*){in2};
+            in2 = (PyArrayObject*){in1};
+        }}
+        
+        // Create a reverse view of in2 by negating the 
+        npy_intp stride = PyArray_STRIDES(in2)[0];
+        npy_intp reverse_strides[1] = {{-stride}};
+        npy_intp reverse_offset = (PyArray_SHAPE(in2)[0] - 1) * stride;
+        
+        Py_INCREF(PyArray_DESCR(in2));
+        PyArrayObject* rev_in2 = (PyArrayObject*)PyArray_NewFromDescr(
+            &PyArray_Type,
+            PyArray_DESCR(in2),
+            1,
+            PyArray_SHAPE(in2),
+            reverse_strides,
+            PyArray_BYTES(in2) + reverse_offset,
+            PyArray_FLAGS(in2),
+            NULL);
+                        
+        if (!rev_in2){{
+            {fail}
+        }}
+
+        Py_INCREF(in2);
+        PyArray_SetBaseObject(rev_in2, (PyObject*)in2);        
+        {out} = (PyArrayObject *) PyArray_Correlate((PyObject*)in1, (PyObject*)rev_in2, {mode});
+        Py_DECREF(rev_in2);
+        
+        if (!{out}){{
+            {fail}
+        }}
+        """
+
+    def c_code_cache_version(self) -> tuple[Hashable, ...]:
+        return None
 
 
 def convolve1d(

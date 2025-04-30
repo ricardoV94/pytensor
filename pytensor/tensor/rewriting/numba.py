@@ -104,5 +104,6 @@ optdb.register(
     introduce_explicit_core_shape_blockwise.__name__,
     out2in(introduce_explicit_core_shape_blockwise),
     "numba",
+    "fast_run",
     position=100,
 )

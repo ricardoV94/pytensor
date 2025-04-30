@@ -1,12 +1,10 @@
-from functools import partial
-
 import numpy as np
 import pytest
 
-from pytensor import function
-from pytensor.tensor import dmatrix, tensor
+from pytensor.tensor import dmatrix
 from pytensor.tensor.signal import convolve1d
 from tests.link.numba.test_basic import compare_numba_and_py
+from tests.tensor.signal.test_conv import convolve1d_benchmark_tester
 
 
 pytestmark = pytest.mark.filterwarnings("error")
@@ -31,29 +29,7 @@ def test_convolve1d(x_smaller, mode):
 
 @pytest.mark.parametrize("mode", ("full", "valid"), ids=lambda x: f"mode={x}")
 @pytest.mark.parametrize("batch", (False, True), ids=lambda x: f"batch={x}")
-def test_convolve1d_benchmark(batch, mode, benchmark):
-    x = tensor(
-        shape=(
-            7,
-            183,
-        )
-        if batch
-        else (183,)
+def test_convolve1d_benchmark_numba(batch, mode, benchmark):
+    convolve1d_benchmark_tester(
+        compile_mode="NUMBA", batch=batch, mode=mode, benchmark=benchmark
     )
-    y = tensor(shape=(7, 6) if batch else (6,))
-    out = convolve1d(x, y, mode=mode)
-    fn = function([x, y], out, mode="NUMBA", trust_input=True)
-
-    rng = np.random.default_rng()
-    x_test = rng.normal(size=(x.type.shape)).astype(x.type.dtype)
-    y_test = rng.normal(size=(y.type.shape)).astype(y.type.dtype)
-
-    np_convolve1d = np.vectorize(
-        partial(np.convolve, mode=mode), signature="(x),(y)->(z)"
-    )
-
-    np.testing.assert_allclose(
-        fn(x_test, y_test),
-        np_convolve1d(x_test, y_test),
-    )
-    benchmark(fn, x_test, y_test)

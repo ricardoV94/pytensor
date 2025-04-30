@@ -15,6 +15,7 @@ from pytensor.graph.replace import (
     _vectorize_not_needed,
     vectorize_graph,
 )
+from pytensor.link.c.op import COp
 from pytensor.scalar import ScalarType
 from pytensor.tensor import as_tensor_variable
 from pytensor.tensor.shape import shape_padleft
@@ -435,8 +436,102 @@ class OpWithCoreShape(OpFromGraph):
         return super().__init__(*args, on_unused_input=on_unused_input, **kwargs)
 
 
-class BlockwiseWithCoreShape(OpWithCoreShape):
+class BlockwiseWithCoreShape(OpWithCoreShape, COp):
     """Generalizes a Blockwise `Op` to include a core shape parameter."""
+
+    def c_code_cache_version(self):
+        return None
+
+    def c_code(self, node, nodename, inames, onames, sub):
+        [blockwise_node] = self.fgraph.apply_nodes
+        blockwise_op: Blockwise = blockwise_node.op
+        core_op = blockwise_op.core_op
+        core_node = blockwise_op._create_dummy_core_node(blockwise_node.inputs)
+
+        if len(inames) != 2 and len(onames) != 1:
+            raise NotImplementedError()
+
+        if not isinstance(core_op, COp):
+            raise NotImplementedError("Core op is not a COp")
+
+        sub["fail"] = "//fail"
+        core_sub = sub.copy()
+        params = core_op.get_params(core_node)
+        core_sub["params"] = params
+
+        core_c_code = core_op.c_code(
+            core_node,
+            nodename + "_core_",
+            [f"{s}_i" for s in inames[:-1]],
+            [f"{s}_i" for s in onames],
+            core_sub,
+        )
+        # print(core_c_code)
+
+        x, core_shape = inames
+        [out] = onames
+        fail = sub["fail"]
+        batch_ndim = blockwise_op.batch_ndim(blockwise_node)
+        in_ndim = blockwise_node.inputs[0].type.ndim
+        out_ndim = blockwise_node.outputs[0].type.ndim
+        core_in_ndim = in_ndim - batch_ndim
+        core_out_ndim = out_ndim - batch_ndim
+        out_typenum = blockwise_node.outputs[0].type.dtype_specs()[2]
+
+        code = f"""
+        Py_XDECREF({out});
+        
+        npy_intp *in_shape = PyArray_SHAPE({x});
+        
+        npy_intp out_shape[{out_ndim}];
+        int i = 0;
+        for (; i < {batch_ndim}; ++i) {{
+            out_shape[i] = in_shape[i];
+        }}
+        for (int j=0; i < {out_ndim}; ++j, ++i){{
+            out_shape[i] = ((npy_intp*)PyArray_DATA({core_shape}))[j];
+        }}
+        
+        {out} = (PyArrayObject*)PyArray_Empty({out_ndim}, out_shape, PyArray_DescrFromType({out_typenum}), 0);
+        if ({out} == NULL) {{
+            {fail}
+        }}
+        
+        // Now that we have the output array, select first core view of input/output and make it work with the core code
+        // Note the _i suffix that the core_code expectes
+        
+        // Prepare shape pointers for the core part
+        npy_intp* in_core_shape = in_shape + {batch_ndim};
+        npy_intp* out_core_shape = out_shape + {batch_ndim};
+        
+        // Calculate strides for the batch dimension
+        npy_intp* in_strides = PyArray_STRIDES({x});
+        npy_intp* out_strides = PyArray_STRIDES({out});
+        
+        // Get data pointers for the first batch element
+        char* in_core_data = (char*)PyArray_DATA({x});
+        char* out_core_data = (char*)PyArray_DATA({out});
+        
+        // Create views for the first batch element
+        PyArrayObject* {x}_i = (PyArrayObject*)PyArray_New(
+            &PyArray_Type, {core_in_ndim}, in_core_shape, PyArray_TYPE({x}),
+            in_strides + {batch_ndim}, in_core_data, 0, NPY_ARRAY_ALIGNED, NULL);
+        
+        PyArrayObject* {out}_i = (PyArrayObject*)PyArray_New(
+            &PyArray_Type, {core_out_ndim}, out_core_shape, PyArray_TYPE({out}),
+            out_strides + {batch_ndim}, out_core_data, 0, NPY_ARRAY_ALIGNED, NULL);
+        
+        PyArrayObject* orig_{out}_i = {out}_i;
+        
+        {{
+            {core_c_code}
+        }}
+        
+        PyArray_CopyInto(orig_{out}_i, {out}_i);
+        
+        """
+        print(code)
+        return code
 
     def __str__(self):
         [blockwise_node] = self.fgraph.apply_nodes

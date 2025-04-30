@@ -378,7 +378,7 @@ class CumOp(COp):
         if self.axis is None:
             axis_code = "int axis = NPY_RAVEL_AXIS;\n"
         else:
-            axis_code = f"int axis = {params}->c_axis;\n"
+            axis_code = f"int axis = {self.axis};\n"
 
         code = (
             axis_code
@@ -397,8 +397,24 @@ class CumOp(COp):
 
                 else if(axis != NPY_RAVEL_AXIS && !({z} && PyArray_CompareLists(PyArray_DIMS({z}), PyArray_DIMS({x}), PyArray_NDIM({x}))))
                 {{
+                    printf("z didn't cut it");
                     Py_XDECREF({z});
                     {z} = (PyArrayObject*) PyArray_SimpleNew(PyArray_NDIM({x}), PyArray_DIMS({x}), PyArray_TYPE({x}));
+                }}
+                else {{
+                    printf("z seemed fine\\n");
+                }}
+                
+                // Print the contents of x (assume its a float64 vector array)
+                printf("x contents: ");
+                for (npy_intp i = 0; i < PyArray_SIZE({x}); ++i) {{
+                    printf("%f ", *(double *)PyArray_GETPTR1({x}, i));
+                }}
+                printf("\\n");
+                
+                printf("out contents: ");
+                for (npy_intp i = 0; i < PyArray_SIZE({z}); ++i) {{
+                    printf("%f ", *(double *)PyArray_GETPTR1({z}, i));
                 }}
 
                 if (!{z})
@@ -406,11 +422,11 @@ class CumOp(COp):
                 {{
 
                     PyObject * t = NULL;
-                    if({params}->mode == MODE_ADD)
+                    if({int(self.mode == "add")})
                         t = PyArray_CumSum(
                             {x}, axis,
                             PyArray_TYPE({x}), {z});
-                    else if({params}->mode == MODE_MUL)
+                    else
                         t = PyArray_CumProd(
                             {x}, axis,
                             PyArray_TYPE({x}), {z});
@@ -421,6 +437,11 @@ class CumOp(COp):
                     // Because PyArray_CumSum/CumProd returns a newly created reference on t.
                     Py_XDECREF(t);
                 }}
+                printf("out contents: ");
+                for (npy_intp i = 0; i < PyArray_SIZE({z}); ++i) {{
+                    printf("%f ", *(double *)PyArray_GETPTR1({z}, i));
+                }}
+                printf("\\n");
             """
         )
 
