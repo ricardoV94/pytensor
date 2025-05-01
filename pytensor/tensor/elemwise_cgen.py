@@ -715,11 +715,13 @@ def make_reordered_loop_careduce(
         iter_var = f"iter_{i}"
         dim_length = f"dim_length_{i}"
         if i == inp_ndim - 1:
+            simd = 0
             # innermost loop
             is_initial_iteration = " && ".join(
                 f"(!is_reduction_axis_{j} || iter_{j} == 0)"
                 for j in range(inp_ndim - 1)
             )
+
             # Code where we write to an intermediate variable in the innermost loop
             inp_pointer_update = f"{inp_dtype} &{inp_var}_i = *({inp_var}_iter"
             for j in reversed(tuple(range(inp_ndim))):
@@ -731,21 +733,57 @@ def make_reordered_loop_careduce(
                 acc_pointer += f" + {acc_var}_stride_{j}*iter_{j}"
             acc_pointer += ")"
 
-            temporary_accumulation_loop = dedent(
-                f"""
-                if ({is_initial_iteration}){{
-                    {acc_pointer} = {initial_value};
-                }}
-                {acc_dtype} {acc_var}_i = {initial_value};
-                for (int {iter_var} = 0; {iter_var}<{dim_length}; {iter_var}++){{
-                    {inp_pointer_update}
-                    {{
-                        {inner_task}
+            if not simd:
+                temporary_accumulation_loop = dedent(
+                    f"""
+                    if ({is_initial_iteration}){{
+                        {acc_pointer} = {initial_value};
                     }}
-                }}
-                {acc_pointer} += {acc_var}_i;
-                """
-            )
+                    {acc_dtype} {acc_var}_i = {initial_value};
+                    for (int {iter_var} = 0; {iter_var}<{dim_length}; {iter_var}++){{
+                        {inp_pointer_update}
+                        {{
+                            {inner_task}
+                        }}
+                    }}
+                    {acc_pointer} += {acc_var}_i;
+                    """
+                )
+            else:
+                # Use a temporary accumulator for SIMD
+                temporary_accumulation_loop = dedent(
+                    f"""
+                    if ({is_initial_iteration}){{
+                        {acc_pointer} = {initial_value};
+                    }}
+                    {acc_dtype} {acc_var}_i = {initial_value};
+                    int simd_width = 4;
+                    int simd_len = {dim_length} / simd_width * simd_width;
+                    int k = 0;
+                    __m256d vsum = _mm256_setzero_pd();
+                    for (; k < simd_len; k += simd_width) {{
+                        __m256d v = _mm256_loadu_pd(
+                            ({inp_dtype}*)({inp_var}_iter
+                            {''.join([f' + {inp_var}_stride_{j}*iter_{j}' for j in reversed(tuple(range(inp_ndim - 1)))])}
+                            + {inp_var}_stride_{i}*k)
+                        );
+                        vsum = _mm256_add_pd(vsum, v);
+                    }}
+                    // Horizontal add
+                    double sum_arr[4];
+                    _mm256_storeu_pd(sum_arr, vsum);
+                    for (int j = 0; j < simd_width; ++j) {{
+                        {acc_var}_i += sum_arr[j];
+                    }}
+                    for (; k < {dim_length}; ++k) {{
+                        {inp_dtype} &{inp_var}_i = *({inp_var}_iter
+                            {''.join([f' + {inp_var}_stride_{j}*iter_{j}' for j in reversed(tuple(range(inp_ndim - 1)))])}
+                            + {inp_var}_stride_{i}*k);
+                        {acc_var}_i += {inp_var}_i;
+                    }}
+                    {acc_pointer} += {acc_var}_i;
+                    """
+                )
         else:
             temporary_accumulation_loop = dedent(
                 f"""

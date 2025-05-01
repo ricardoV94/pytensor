@@ -1576,10 +1576,11 @@ class CAReduce(COp):
 
     def c_headers(self, **kwargs):
         # Sometimes, Elemwise's c_code is returned, so we need its headers
-        return ["<vector>", "<algorithm>"]
+        return ["<vector>", "<algorithm>", "<immintrin.h>"]
 
     def c_code_cache_version_apply(self, node):
         # the version corresponding to the c code in this Op
+        return None
         version = [11]
 
         # now we insert versions for the ops on which we depend...

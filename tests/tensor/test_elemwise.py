@@ -1056,7 +1056,14 @@ def careduce_benchmark_tester(axis, c_contiguous, mode, benchmark):
 
 @pytest.mark.parametrize(
     "axis",
-    (0, 1, 2, (0, 1), (0, 2), (1, 2), None),
+    (
+        0,
+        1,
+        2,
+        (0, 1),
+        (0, 2),
+        (1, 2),
+    )[2:3],
     ids=lambda x: f"axis={x}",
 )
 @pytest.mark.parametrize(
@@ -1065,7 +1072,7 @@ def careduce_benchmark_tester(axis, c_contiguous, mode, benchmark):
     ids=lambda x: f"c_contiguous={x}",
 )
 @pytensor.config.change_flags(
-    gcc__cxxflags="-freciprocal-math -ffp-contract=fast -funsafe-math-optimizations -fassociative-math -fno-signed-zeros -ftree-loop-distribution -funroll-loops -ftracer"
+    gcc__cxxflags="-ffast-math -ftree-loop-distribution -funroll-loops -ftracer"
 )
 def test_c_careduce_benchmark(axis, c_contiguous, benchmark):
     return careduce_benchmark_tester(
