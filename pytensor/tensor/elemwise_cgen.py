@@ -538,7 +538,7 @@ def make_complete_loop_careduce(
             }}else{{
                 iter = NpyIter_New({inp_var},
                                    NPY_ITER_READONLY| NPY_ITER_EXTERNAL_LOOP| NPY_ITER_REFS_OK,
-                                   NPY_KEEPORDER,  // TODO: Any order is good!
+                                   NPY_KEEPORDER,
                                    NPY_NO_CASTING,
                                    NULL);
 
@@ -584,7 +584,6 @@ def make_reordered_loop_careduce(
     reduction_axes: Sequence[int],
     initial_value: str,
     inner_task: str,
-    keepdims: bool,
 ) -> str:
     """Generate C code for a partial reduction loop, reordering for optimal memory access of the input variable.
 
@@ -689,19 +688,15 @@ def make_reordered_loop_careduce(
     order_loops += "\nstd::sort(loops.rbegin(), loops.rend());\n"
 
     # Sort shape and strides to match the new order that was computed by sorting the loop vector.
+    counter = iter(range(inp_ndim))
     unsorted_vars = dedent(
         f"""
         int dim_lengths[{inp_ndim}] = {{{','.join(f'{inp_var}_n{i}' for i in range(inp_ndim))}}};
         int inp_strides[{inp_ndim}] = {{{','.join(f'{inp_var}_stride{i}' for i in range(inp_ndim))}}};
-        bool reduction_axes[{inp_ndim}] = {{{', '.join("1" if i in reduction_axes else "0" for i in range(inp_ndim))}}};
+        int acc_strides[{inp_ndim}] = {{{','.join("0" if i in reduction_axes else f'{acc_var}_stride{next(counter)}'for i in range(inp_ndim))}}};
+        bool reduction_axes[{inp_ndim}] = {{{', '.join("1" if i in reduction_axes else "0" for i in range(inp_ndim))}}};\n
         """
     )
-    if keepdims:
-        unsorted_vars += f"int acc_strides[{inp_ndim}] = {{{','.join("0" if i in reduction_axes else f'{acc_var}_stride{i}'for i in range(inp_ndim))}}};\n"
-    else:
-        # Reduced dims don't exist
-        counter = iter(range(inp_ndim))
-        unsorted_vars += f"int acc_strides[{inp_ndim}] = {{{','.join("0" if i in reduction_axes else f'{acc_var}_stride{next(counter)}'for i in range(inp_ndim))}}};\n"
 
     sorted_vars = "loops_it = loops.begin();"
     for i in range(inp_ndim):

@@ -66,7 +66,7 @@ from pytensor.tensor.basic import (
     zeros,
     zeros_like,
 )
-from pytensor.tensor.elemwise import CAReduce, DimShuffle, Elemwise, ExpandDims2
+from pytensor.tensor.elemwise import DimShuffle, Elemwise, ExpandDims2
 from pytensor.tensor.exceptions import NotScalarConstantError
 from pytensor.tensor.extra_ops import broadcast_arrays
 from pytensor.tensor.math import Sum, add, eq, variadic_add
@@ -1348,9 +1348,6 @@ def local_join_of_alloc(fgraph, node):
 @node_rewriter([DimShuffle])
 def dimshuffle_to_expand_dims(fgraph, node):
     if node.op.is_expand_dims:
-        [x] = node.inputs
-        if x.owner is not None and isinstance(x.owner.op, CAReduce):
-            return None
         return [ExpandDims2(node.op.augment)(node.inputs[0])]
 
 

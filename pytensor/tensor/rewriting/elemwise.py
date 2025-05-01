@@ -1237,29 +1237,6 @@ def local_inline_composite_constants(fgraph, node):
     return new_outputs
 
 
-@node_rewriter([DimShuffle])
-def local_careduce_keepdims(fgraph, node):
-    ds_op: DimShuffle = node.op
-    if not ds_op.is_expand_dims:
-        return
-    [x] = node.inputs
-    if not (
-        x.owner is not None
-        and isinstance(x.owner.op, CAReduce)
-        and not x.owner.op.keepdims
-        and len(fgraph.clients[x]) == 1
-    ):
-        return
-
-    axis = x.owner.op.axis
-    if axis is None:
-        axis = tuple(range(x.owner.inputs[0].ndim))
-    if tuple(ds_op.augment) == axis:
-        # Touche!
-        reduce_with_keepdims = x.owner.op.clone(keepdims=True)
-        return [reduce_with_keepdims(x.owner.inputs[0])]
-
-
 # Register fusion database just before AddDestroyHandler(49.5) (inplace rewrites)
 fuse_seqopt = SequenceDB()
 compile.optdb.register(
@@ -1300,16 +1277,6 @@ fuse_seqopt.register(
     "fusion",
     position=10,
 )
-
-fuse_seqopt.register(
-    "local_careduce_keepdims",
-    in2out(local_careduce_keepdims),
-    "fast_run",
-    "fusion",
-    "cxx_only",
-    position=11,
-)
-
 fuse_seqopt.register(
     "local_inline_composite_constants",
     in2out(local_inline_composite_constants),

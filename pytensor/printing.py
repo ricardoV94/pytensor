@@ -101,7 +101,6 @@ def debugprint(
     print_view_map: bool = False,
     print_memory_map: bool = False,
     print_fgraph_inputs: bool = False,
-    print_inner_graphs: bool = True,
 ) -> str | TextIO:
     r"""Print a graph as text.
 
@@ -294,14 +293,9 @@ N.B.:
     ):
         if hasattr(var.owner, "op"):
             if (
-                print_inner_graphs
-                and (
-                    isinstance(var.owner.op, HasInnerGraph)
-                    or (
-                        hasattr(var.owner.op, "scalar_op")
-                        and isinstance(var.owner.op.scalar_op, HasInnerGraph)
-                    )
-                )
+                isinstance(var.owner.op, HasInnerGraph)
+                or hasattr(var.owner.op, "scalar_op")
+                and isinstance(var.owner.op.scalar_op, HasInnerGraph)
             ) and var not in inner_graph_vars:
                 inner_graph_vars.append(var)
             if print_op_info:
@@ -326,7 +320,6 @@ N.B.:
             print_op_info=print_op_info,
             print_destroy_map=print_destroy_map,
             print_view_map=print_view_map,
-            print_inner_graphs=print_inner_graphs,
         )
 
     if len(inner_graph_vars) > 0:
@@ -492,7 +485,6 @@ def _debugprint(
     print_op_info: bool = False,
     inner_graph_node: Apply | None = None,
     is_inner_graph_header: bool = False,
-    print_inner_graphs: bool = True,
 ) -> TextIO:
     r"""Print the graph represented by `var`.
 
@@ -679,11 +671,7 @@ def _debugprint(
                     new_prefix = prefix_child + " └─ "
                     new_prefix_child = prefix_child + "   "
 
-                if (
-                    hasattr(in_var, "owner")
-                    and hasattr(in_var.owner, "op")
-                    and print_inner_graphs
-                ):
+                if hasattr(in_var, "owner") and hasattr(in_var.owner, "op"):
                     if (
                         isinstance(in_var.owner.op, HasInnerGraph)
                         or hasattr(in_var.owner.op, "scalar_op")
@@ -714,7 +702,6 @@ def _debugprint(
                     print_destroy_map=print_destroy_map,
                     print_view_map=print_view_map,
                     inner_graph_node=inner_graph_node,
-                    print_inner_graphs=print_inner_graphs,
                 )
         elif not is_inner_graph_header:
             print(prefix_child + " └─ ···", file=file)
