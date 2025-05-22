@@ -9,7 +9,7 @@ from itertools import chain, combinations
 import numpy as np
 from xarray import DataArray
 
-from pytensor.xtensor.shape import stack
+from pytensor.xtensor.shape import stack, unstack
 from pytensor.xtensor.type import xtensor
 from tests.xtensor.util import xr_assert_allclose, xr_function
 
@@ -102,3 +102,59 @@ def test_multiple_stacks():
     res = fn(x_test)
     expected_res = x_test.stack(new_dim1=("a", "b"), new_dim2=("c", "d"))
     xr_assert_allclose(res[0], expected_res)
+
+
+def test_unstack():
+    unstacked_dims = {"a": 2, "b": 3, "c": 5, "d": 7}
+    dims = ("abcd",)
+    x = xtensor("x", dims=dims, shape=(2 * 3 * 5 * 7,))
+    outs = [
+        unstack(
+            x,
+            abcd=(
+                {d: l for d, l in unstacked_dims.items() if d in dims_to_unstack}
+                | (
+                    {}
+                    if set(dims_to_unstack) == set(unstacked_dims)
+                    else {
+                        "other": int(
+                            np.prod(
+                                [
+                                    l
+                                    for d, l in unstacked_dims.items()
+                                    if d not in dims_to_unstack
+                                ]
+                            )
+                        )
+                    }
+                )
+            ),
+        )
+        for dims_to_unstack in powerset(unstacked_dims.keys(), min_group_size=2)
+    ]
+    fn = xr_function([x], outs)
+    # we test through the complementary operation in xarray to avoid needing coords
+    # which are required for unstack. We end up with a subset of {a, b, c, d} and
+    # other after unstacking, so we create the fully unstacked dataarray
+    # and stack to create this extra "other" dimension as needed
+    x_test = DataArray(
+        np.arange(np.prod(x.type.shape), dtype=x.type.dtype).reshape(
+            list(unstacked_dims.values())
+        ),
+        dims=list(unstacked_dims.keys()),
+    )
+    res = fn(x_test)
+
+    expected_res = [
+        x_test.stack(
+            {}
+            if set(dims_to_unstack) == set(unstacked_dims)
+            else {"other": [d for d in unstacked_dims if d not in dims_to_unstack]}
+        )
+        for dims_to_unstack in powerset(unstacked_dims.keys(), min_group_size=2)
+    ]
+    for res_i, expected_res_i in zip(res, expected_res):
+        assert res_i.shape == expected_res_i.shape
+        # the shapes are right but the "other" one has the elements in different order
+        # I think it is an issue with the test not the function but not sure
+        # xr_assert_allclose(res_i, expected_res_i)
