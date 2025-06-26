@@ -41,7 +41,8 @@ def _as_xrv(
         core_out_dims_map = tuple(range(core_op.ndim_supp))
 
     core_dims_needed = max(
-        (*(len(i) for i in core_inps_dims_map), len(core_out_dims_map)), default=0
+        max((max((entry + 1 for entry in dims_map), default=0) for dims_map in core_inps_dims_map), default=0),
+        max((entry + 1 for entry in core_out_dims_map), default=0),
     )
 
     @wraps(core_op)
@@ -50,6 +51,7 @@ def _as_xrv(
         core_dims: Sequence[str] | str | None = None,
         extra_dims: dict[str, Variable] | None = None,
         rng: Variable | None = None,
+        dtype: str | None = None,
     ):
         if core_dims is None:
             core_dims = ()

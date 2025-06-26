@@ -67,6 +67,7 @@ class XTensorType(Type, HasDataType, HasShape):
                 raise ValueError(
                     f"Shape {self.shape} must have the same length as dims {self.dims}"
                 )
+        self.broadcastable = tuple(s == 1 for s in self.shape)
         self.ndim = len(self.dims)
         self.name = name
         self.numpy_dtype = np.dtype(self.dtype)
@@ -92,6 +93,10 @@ class XTensorType(Type, HasDataType, HasShape):
         return TensorType.filter(
             self, value, strict=strict, allow_downcast=allow_downcast
         )
+
+    @staticmethod
+    def may_share_memory(a, b):
+        return TensorType.may_share_memory(a, b)
 
     def filter_variable(self, other, allow_convert=True):
         if not isinstance(other, Variable):
@@ -160,7 +165,7 @@ class XTensorType(Type, HasDataType, HasShape):
         return None
 
     def __repr__(self):
-        return f"XTensorType({self.dtype}, {self.dims}, {self.shape})"
+        return f"XTensorType({self.dtype}, shape={self.shape}, dims={self.dims})"
 
     def __hash__(self):
         return hash((type(self), self.dtype, self.shape, self.dims))
