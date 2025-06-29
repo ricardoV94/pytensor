@@ -67,7 +67,7 @@ class XTensorType(Type, HasDataType, HasShape):
                 raise ValueError(
                     f"Shape {self.shape} must have the same length as dims {self.dims}"
                 )
-        self.broadcastable = tuple(s == 1 for s in self.shape)
+        self.broadcastable = tuple(bool(s == 1) for s in self.shape)
         self.ndim = len(self.dims)
         self.name = name
         self.numpy_dtype = np.dtype(self.dtype)
