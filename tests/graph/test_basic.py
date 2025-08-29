@@ -227,23 +227,19 @@ class TestToposort:
         o2 = MyOp(o, r5)
         o2.name = "o2"
 
-        clients = {}
-        res = general_toposort([o2], prenode, clients=clients)
+        res = general_toposort([o2], prenode)
 
-        assert clients == {
-            o2.owner: [o2],
-            o: [o2.owner],
-            r5: [o2.owner],
-            o.owner: [o],
-            r1: [o.owner],
-            r2: [o.owner],
-        }
         assert res == [r5, r2, r1, o.owner, o, o2.owner, o2]
 
-        with pytest.raises(ValueError):
-            general_toposort(
-                [o2], prenode, compute_deps_cache=lambda x: None, deps_cache=None
-            )
+        def circular_dependencies(obj):
+            if obj is o:
+                # State that o depends on o2, when we know o2 depends on o
+                return [o2, *prenode(obj)]
+            else:
+                return prenode(obj)
+
+        with pytest.raises(ValueError, match="Graph contains cycles"):
+            general_toposort([o2], deps=circular_dependencies)
 
         res = io_toposort([r5], [o2])
         assert res == [o.owner, o2.owner]
@@ -331,31 +327,6 @@ class TestToposort:
             v1.owner,
             out.owner,
         }
-
-    @pytest.mark.parametrize(
-        "toposort_func",
-        [
-            lambda x: list(variable_ancestors([x])),
-            lambda x: list(apply_ancestors([x.owner])),
-            lambda x: io_toposort([], [x]),
-            lambda x: io_toposort([], [x], orderings={x: []}),
-            lambda x: list(apply_toposort([x.owner])),
-        ],
-        ids=[
-            "variable_ancestors",
-            "apply_ancestors",
-            "variable_toposort",
-            "variable_toposort_with_orderings",
-            "apply_toposort",
-        ],
-    )
-    def test_benchmark(self, toposort_func, benchmark):
-        r1 = MyVariable(1)
-        out = r1
-        for i in range(50):
-            out = MyOp(out, out)
-
-        benchmark(toposort_func, out)
 
 
 class TestEval:
@@ -912,3 +883,29 @@ def test_dprint():
     o1 = MyOp(r1, r2)
     assert o1.dprint(file="str") == debugprint(o1, file="str")
     assert o1.owner.dprint(file="str") == debugprint(o1.owner, file="str")
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        lambda x: list(variable_ancestors([x])),
+        lambda x: list(apply_ancestors([x.owner])),
+        lambda x: io_toposort([], [x]),
+        lambda x: io_toposort([], [x], orderings={x: []}),
+        lambda x: list(apply_toposort([x.owner])),
+    ],
+    ids=[
+        "variable_ancestors",
+        "apply_ancestors",
+        "variable_toposort",
+        "variable_toposort_with_orderings",
+        "apply_toposort",
+    ],
+)
+def test_traversal_benchmark(func, benchmark):
+    r1 = MyVariable(1)
+    out = r1
+    for i in range(50):
+        out = MyOp(out, out)
+
+    benchmark(func, out)

@@ -22,6 +22,7 @@ from pytensor.graph.basic import (
     AtomicVariable,
     Constant,
     Variable,
+    apply_ancestors,
     apply_toposort,
     applys_between,
     vars_between,
@@ -1836,7 +1837,11 @@ class WalkingGraphRewriter(NodeProcessingGraphRewriter):
         callback_before = fgraph.execute_callbacks_time
         nb_nodes_start = len(fgraph.apply_nodes)
         t0 = time.perf_counter()
-        q = deque(apply_toposort(output_nodes=(o.owner for o in start_from)))
+        # TODO: Simple trackers functionality when trackers is a single item
+        if self.order == "bfs":
+            q = deque(apply_ancestors(o.owner for o in start_from))
+        else:
+            q = deque(apply_toposort(output_nodes=(o.owner for o in start_from)))
         io_t = time.perf_counter() - t0
 
         def importer(node):
@@ -1959,6 +1964,7 @@ def walking_rewriter(
 
 in2out = partial(walking_rewriter, "in_to_out")
 out2in = partial(walking_rewriter, "out_to_in")
+bfs_rewriter = partial(walking_rewriter, "bfs")
 
 
 class ChangeTracker(Feature):

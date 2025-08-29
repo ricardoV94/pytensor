@@ -130,7 +130,7 @@ class FunctionGraph(MetaObject):
             features = []
 
         self._features: list[Feature] = []
-
+        # Features are executed in the order they are added
         # All apply nodes in the subgraph defined by inputs and
         # outputs are cached in this field
         self.apply_nodes: set[Apply] = set()
@@ -361,7 +361,7 @@ class FunctionGraph(MetaObject):
         """
         # We import the nodes in topological order. We only are interested in
         # new nodes, so we use all nodes we know of as inputs to interrupt the toposort
-        for node in apply_toposort([apply_node], node_inputs=self.apply_nodes):
+        for node in apply_toposort([apply_node], blockers=self.apply_nodes):
             if check:
                 for var in node.inputs:
                     if (
@@ -746,12 +746,11 @@ class FunctionGraph(MetaObject):
           :meth:`FunctionGraph.orderings`.
 
         """
-        orderings = self.orderings()
-        if orderings:
+        if orderings := self.orderings():
             return io_toposort(self.inputs, self.outputs, orderings)
         else:
             # Faster implementation when no orderings are needed
-            return apply_toposort(o.owner for o in self.outputs)
+            return list(apply_toposort(o.owner for o in self.outputs))
 
     def orderings(self) -> dict[Apply, list[Apply]]:
         """Return a map of node to node evaluation dependencies.
@@ -774,11 +773,12 @@ class FunctionGraph(MetaObject):
 
         for feature in self._features:
             if hasattr(feature, "orderings"):
-                orderings = feature.orderings(self)
-                if orderings:
+                if orderings := feature.orderings(self):
                     all_orderings.append(orderings)
 
-        if len(all_orderings) == 1:
+        if not all_orderings:
+            return {}
+        elif len(all_orderings) == 1:
             # If there is only 1 ordering, we reuse it directly.
             return all_orderings[0].copy()
         else:
