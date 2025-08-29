@@ -9,7 +9,7 @@ import pytensor
 import tests.unittest_tools as utt
 from pytensor.compile import DeepCopyOp
 from pytensor.compile.mode import get_default_mode
-from pytensor.graph.basic import Constant, equal_computations
+from pytensor.graph.basic import Constant, apply_toposort, equal_computations
 from pytensor.tensor import get_vector_length
 from pytensor.tensor.basic import constant
 from pytensor.tensor.elemwise import DimShuffle
@@ -144,8 +144,7 @@ def test__getitem__Subtensor():
     i = iscalar("i")
 
     z = x[i]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == Subtensor
+    assert type(z.owner.op) is Subtensor
 
     # This should ultimately do nothing (i.e. just return `x`)
     z = x[()]
@@ -170,16 +169,13 @@ def test__getitem__Subtensor():
     assert op_types[1:] == [DimShuffle, Subtensor]
 
     z = x[:]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == Subtensor
+    assert type(z.owner.op) is Subtensor
 
     z = x[..., :]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == Subtensor
+    assert type(z.owner.op) is Subtensor
 
     z = x[..., i, :]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == Subtensor
+    assert type(z.owner.op) is Subtensor
 
 
 def test__getitem__AdvancedSubtensor_bool():
@@ -187,25 +183,21 @@ def test__getitem__AdvancedSubtensor_bool():
     i = TensorType("bool", shape=(None, None))("i")
 
     z = x[i]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == AdvancedSubtensor
+    assert type(z.owner.op) is AdvancedSubtensor
 
     i = TensorType("bool", shape=(None,))("i")
     z = x[:, i]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == AdvancedSubtensor
+    assert type(z.owner.op) is AdvancedSubtensor
 
     i = TensorType("bool", shape=(None,))("i")
     z = x[..., i]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == AdvancedSubtensor
+    assert type(z.owner.op) is AdvancedSubtensor
 
     with pytest.raises(TypeError):
         z = x[[True, False], i]
 
     z = x[ivector("b"), i]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == AdvancedSubtensor
+    assert type(z.owner.op) is AdvancedSubtensor
 
 
 def test__getitem__AdvancedSubtensor():
@@ -215,27 +207,25 @@ def test__getitem__AdvancedSubtensor():
 
     # This is a `__getitem__` call that's redirected to `_tensor_py_operators.take`
     z = x[i]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == AdvancedSubtensor
+    assert type(z.owner.op) is AdvancedSubtensor
 
     # This should index nothing (i.e. return an empty copy of `x`)
     # We check that the index is empty
     z = x[[]]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
+    op_types = [type(node.op) for node in apply_toposort([z.owner])]
     assert op_types == [AdvancedSubtensor]
     assert isinstance(z.owner.inputs[1], TensorConstant)
 
     z = x[:, i]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
+    op_types = [type(node.op) for node in apply_toposort([z.owner])]
     assert op_types == [MakeSlice, AdvancedSubtensor]
 
     z = x[..., i, None]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
+    op_types = [type(node.op) for node in apply_toposort([z.owner])]
     assert op_types == [MakeSlice, AdvancedSubtensor]
 
     z = x[i, None]
-    op_types = [type(node.op) for node in pytensor.graph.basic.io_toposort([x, i], [z])]
-    assert op_types[-1] == AdvancedSubtensor
+    assert type(z.owner.op) is AdvancedSubtensor
 
 
 def test_print_constant():

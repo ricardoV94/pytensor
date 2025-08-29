@@ -9,7 +9,6 @@ from collections.abc import (
     Generator,
     Hashable,
     Iterable,
-    Iterator,
     Reversible,
     Sequence,
 )
@@ -23,7 +22,6 @@ from typing import (
     TypeVar,
     Union,
     cast,
-    overload,
 )
 
 import numpy as np
@@ -832,66 +830,95 @@ class Constant(AtomicVariable[_TypeType]):
         return self.data
 
 
-def walk(
-    nodes: Iterable[T],
-    expand: Callable[[T], Iterable[T] | None],
-    bfs: bool = True,
-    return_children: bool = False,
-    hash_fn: Callable[[T], int] = id,
-) -> Generator[T | NodeAndChildren, None, None]:
-    r"""Walk through a graph, either breadth- or depth-first.
+def default_node_formatter(op, argstrings):
+    return f"{op.op}({', '.join(argstrings)})"
+
+
+def op_as_string(i, op, leaf_formatter=str, node_formatter=default_node_formatter):
+    """Return a function that returns a string representation of the subgraph between `i` and :attr:`op.inputs`"""
+    strs = as_string(i, op.inputs, leaf_formatter, node_formatter)
+    return node_formatter(op, strs)
+
+
+def as_string(
+    inputs: list[Variable],
+    outputs: list[Variable],
+    leaf_formatter=str,
+    node_formatter=default_node_formatter,
+) -> list[str]:
+    r"""Returns a string representation of the subgraph between `inputs` and `outputs`.
 
     Parameters
     ----------
-    nodes
-        The nodes from which to start walking.
-    expand
-        A callable that is applied to each node in `nodes`, the results of
-        which are either new nodes to visit or ``None``.
-    bfs
-        If ``True``, breath first search is used; otherwise, depth first
-        search.
-    return_children
-        If ``True``, each output node will be accompanied by the output of
-        `expand` (i.e. the corresponding child nodes).
-    hash_fn
-        The function used to produce hashes of the elements in `nodes`.
-        The default is ``id``.
+    inputs : list
+        Input `Variable`\s.
+    outputs : list
+        Output `Variable`\s.
+    leaf_formatter : callable
+        Takes a `Variable` and returns a string to describe it.
+    node_formatter : callable
+        Takes an `Op` and the list of strings corresponding to its arguments
+        and returns a string to describe it.
 
-    Notes
-    -----
-    A node will appear at most once in the return value, even if it
-    appears multiple times in the `nodes` parameter.
+    Returns
+    -------
+    list of str
+        Returns a string representation of the subgraph between `inputs` and
+        `outputs`. If the same node is used by several other nodes, the first
+        occurrence will be marked as :literal:`*n -> description` and all
+        subsequent occurrences will be marked as :literal:`*n`, where ``n`` is an id
+        number (ids are attributed in an unspecified order and only exist for
+        viewing convenience).
 
     """
+    i = set(inputs)
 
-    nodes = deque(nodes)
+    orph = list(orphans_between(i, outputs))
 
-    rval_set: set[int] = set()
-
-    nodes_pop: Callable[[], T]
-    if bfs:
-        nodes_pop = nodes.popleft
-    else:
-        nodes_pop = nodes.pop
-
-    while nodes:
-        node: T = nodes_pop()
-
-        node_hash: int = hash_fn(node)
-
-        if node_hash not in rval_set:
-            rval_set.add(node_hash)
-
-            new_nodes: Iterable[T] | None = expand(node)
-
-            if return_children:
-                yield node, new_nodes
+    multi = set()
+    seen = set()
+    for output in outputs:
+        op = output.owner
+        if op in seen:
+            multi.add(op)
+        else:
+            seen.add(op)
+    for op in applys_between(i, outputs):
+        for input in op.inputs:
+            op2 = input.owner
+            if input in i or input in orph or op2 is None:
+                continue
+            if op2 in seen:
+                multi.add(op2)
             else:
-                yield node
+                seen.add(input.owner)
+    multi_list = list(multi)
+    done: set = set()
 
-            if new_nodes:
-                nodes.extend(new_nodes)
+    def multi_index(x):
+        return multi_list.index(x) + 1
+
+    def describe(r):
+        if r.owner is not None and r not in i and r not in orph:
+            op = r.owner
+            idx = op.outputs.index(r)
+            if len(op.outputs) == 1:
+                idxs = ""
+            else:
+                idxs = f"::{idx}"
+            if op in done:
+                return f"*{multi_index(op)}{idxs}"
+            else:
+                done.add(op)
+                s = node_formatter(op, [describe(input) for input in op.inputs])
+                if op in multi_list:
+                    return f"*{multi_index(op)} -> {s}"
+                else:
+                    return s
+        else:
+            return leaf_formatter(r)
+
+    return [describe(output) for output in outputs]
 
 
 def ancestors(
@@ -911,89 +938,100 @@ def ancestors(
     Yields
     ------
     `Variable`\s
-        All input nodes, in the order found by a left-recursive depth-first
-        search started at the nodes in `graphs`.
+        All input variables, in the order found by a breath-first search started at the variables in `graphs`.
 
     """
 
-    def expand(r: Variable) -> Iterator[Variable] | None:
-        if r.owner and (not blockers or r not in blockers):
-            return reversed(r.owner.inputs)
+    # def expand(r: Variable):
+    #     if r.owner and (not blockers or r not in blockers):
+    #         return reversed(r.owner.inputs)
+    #     return None
+    #
+    # yield from cast(Generator[Variable, None, None], walk(graphs, expand, False))
+
+    blockers = set() if blockers is None else set(blockers)
+    seen = set()
+    queue = list(graphs)
+    try:
+        while True:
+            if (var := queue.pop()) not in seen:
+                yield var
+                seen.add(var)
+                if var not in blockers and (node := var.owner) is not None:
+                    queue.extend(reversed(node.inputs))
+    except IndexError:
+        return
+
+
+variable_ancestors = ancestors
+
+
+def apply_ancestors(graphs: Iterable[Apply], blockers: Collection[Apply] = ()):
+    seen = {None, *blockers}
+    queue = list(graphs)
+    try:
+        while True:
+            if (node := queue.pop()) not in seen:
+                yield node
+                seen.add(node)
+                queue.extend(i.owner for i in reversed(node.inputs))
+    except IndexError:
+        return
+
+
+def walk(
+    nodes: Iterable[T],
+    expand: Callable[[T], Iterable[T] | None],
+    bfs: bool = True,
+    return_children: bool = False,
+) -> Generator[T | NodeAndChildren, None, None]:
+    r"""Traversal through a graph, either breadth- or depth-first, with a general expansion function.
+
+    Parameters
+    ----------
+    nodes
+        The nodes from which to start walking.
+    expand
+        A callable that is applied to each node in `nodes`, the results of
+        which are either new nodes to visit or ``None``.
+    bfs
+        If ``True``, breath first search is used; otherwise, depth first
+        search.
+    return_children
+        If ``True``, each output node will be accompanied by the output of
+        `expand` (i.e. the corresponding child nodes).
+
+    Notes
+    -----
+    A node will appear at most once in the return value, even if it
+    appears multiple times in the `nodes` parameter.
+
+    """
+
+    rval_set: set[T] = set()
+    nodes = deque(nodes)
+    nodes_pop: Callable[[], T] = nodes.popleft if bfs else nodes.pop
+    try:
+        if return_children:
+            while True:
+                node: T = nodes_pop()
+                if node not in rval_set:
+                    new_nodes: Iterable[T] | None = expand(node)
+                    yield node, new_nodes
+                    rval_set.add(node)
+                    if new_nodes:
+                        nodes.extend(new_nodes)
+        else:
+            while True:
+                node: T = nodes_pop()
+                if node not in rval_set:
+                    yield node
+                    rval_set.add(node)
+                    new_nodes: Iterable[T] | None = expand(node)
+                    if new_nodes:
+                        nodes.extend(new_nodes)
+    except IndexError:
         return None
-
-    yield from cast(Generator[Variable, None, None], walk(graphs, expand, False))
-
-
-def graph_inputs(
-    graphs: Iterable[Variable], blockers: Collection[Variable] | None = None
-) -> Generator[Variable, None, None]:
-    r"""Return the inputs required to compute the given Variables.
-
-    Parameters
-    ----------
-    graphs : list of `Variable` instances
-        Output `Variable` instances from which to search backward through
-        owners.
-    blockers : list of `Variable` instances
-        A collection of `Variable`\s that, when found, prevent the graph search
-        from preceding from that point.
-
-    Yields
-    ------
-        Input nodes with no owner, in the order found by a left-recursive
-        depth-first search started at the nodes in `graphs`.
-
-    """
-    yield from (r for r in ancestors(graphs, blockers) if r.owner is None)
-
-
-def explicit_graph_inputs(
-    graph: Variable | Iterable[Variable],
-) -> Generator[Variable, None, None]:
-    """
-    Get the root variables needed as inputs to a function that computes `graph`
-
-    Parameters
-    ----------
-    graph : TensorVariable
-        Output `Variable` instances for which to search backward through
-        owners.
-
-    Returns
-    -------
-    iterable
-        Generator of root Variables (without owner) needed to compile a function that evaluates `graphs`.
-
-    Examples
-    --------
-
-    .. code-block:: python
-
-        import pytensor
-        import pytensor.tensor as pt
-        from pytensor.graph.basic import explicit_graph_inputs
-
-        x = pt.vector("x")
-        y = pt.constant(2)
-        z = pt.mul(x * y)
-
-        inputs = list(explicit_graph_inputs(z))
-        f = pytensor.function(inputs, z)
-        eval = f([1, 2, 3])
-
-        print(eval)
-        # [2. 4. 6.]
-    """
-    from pytensor.compile.sharedvalue import SharedVariable
-
-    if isinstance(graph, Variable):
-        graph = [graph]
-
-    return (
-        v
-        for v in graph_inputs(graph)
-        if isinstance(v, Variable) and not isinstance(v, Constant | SharedVariable)
-    )
 
 
 def vars_between(
@@ -1080,6 +1118,122 @@ def applys_between(
     """
     yield from (
         r.owner for r in vars_between(ins, outs) if r not in ins and r.owner is not None
+    )
+
+
+def apply_depends_on(apply: Apply, depends_on: Apply | Collection[Apply]) -> bool:
+    """Determine if any `depends_on` is in the graph given by ``apply``.
+
+    Parameters
+    ----------
+    apply : Apply
+        The Apply node to check.
+    depends_on : Union[Apply, Collection[Apply]]
+        Apply nodes to check dependency on
+
+    Returns
+    -------
+    bool
+
+    """
+    if not isinstance(depends_on, Collection):
+        depends_on = {depends_on}
+    else:
+        depends_on = set(depends_on)
+    return any(ancestor in depends_on for ancestor in apply_ancestors([apply]))
+
+
+def variable_depends_on(
+    variable: Variable, depends_on: Variable | Collection[Variable]
+) -> bool:
+    """Determine if any `depends_on` is in the graph given by ``variable``.
+    Parameters
+    ----------
+    variable: Variable
+        Node to check
+    depends_on: Collection[Variable]
+        Nodes to check dependency on
+
+    Returns
+    -------
+    bool
+    """
+    if not isinstance(depends_on, Collection):
+        depends_on = {depends_on}
+    else:
+        depends_on = set(depends_on)
+    return any(ancestor in depends_on for ancestor in variable_ancestors([variable]))
+
+
+def graph_inputs(
+    graphs: Iterable[Variable], blockers: Collection[Variable] | None = None
+) -> Generator[Variable, None, None]:
+    r"""Return the inputs required to compute the given Variables.
+
+    Parameters
+    ----------
+    graphs : list of `Variable` instances
+        Output `Variable` instances from which to search backward through
+        owners.
+    blockers : list of `Variable` instances
+        A collection of `Variable`\s that, when found, prevent the graph search
+        from preceding from that point.
+
+    Yields
+    ------
+        Input nodes with no owner, in the order found by a breath first search started at the nodes in `graphs`.
+
+    """
+    yield from (r for r in variable_ancestors(graphs, blockers) if r.owner is None)
+
+
+def explicit_graph_inputs(
+    graph: Variable | Iterable[Variable],
+) -> Generator[Variable, None, None]:
+    """
+    Get the root variables needed as inputs to a function that computes `graph`
+
+    Parameters
+    ----------
+    graph : TensorVariable
+        Output `Variable` instances for which to search backward through
+        owners.
+
+    Returns
+    -------
+    iterable
+        Generator of root Variables (without owner) needed to compile a function that evaluates `graphs`.
+
+    Examples
+    --------
+
+    .. code-block:: python
+
+        import pytensor
+        import pytensor.tensor as pt
+        from pytensor.graph.basic import explicit_graph_inputs
+
+        x = pt.vector("x")
+        y = pt.constant(2)
+        z = pt.mul(x * y)
+
+        inputs = list(explicit_graph_inputs(z))
+        f = pytensor.function(inputs, z)
+        eval = f([1, 2, 3])
+
+        print(eval)
+        # [2. 4. 6.]
+    """
+    # TODO: Make SharedVariable a basic graph object
+    from pytensor.compile.sharedvalue import SharedVariable
+
+    if isinstance(graph, Variable):
+        graph = [graph]
+
+    return (
+        v
+        for v in variable_ancestors(graph)
+        if v.owner is None and not isinstance(v, Constant | SharedVariable)
     )
 
 
@@ -1216,213 +1370,28 @@ def truncated_graph_inputs(
     return truncated_inputs
 
 
-def clone(
-    inputs: Sequence[Variable],
-    outputs: Sequence[Variable],
-    copy_inputs: bool = True,
-    copy_orphans: bool | None = None,
-    clone_inner_graphs: bool = False,
-) -> tuple[list[Variable], list[Variable]]:
-    r"""Copies the sub-graph contained between inputs and outputs.
-
-    Parameters
-    ----------
-    inputs
-        Input `Variable`\s.
-    outputs
-        Output `Variable`\s.
-    copy_inputs
-        If ``True``, the inputs will be copied (defaults to ``True``).
-    copy_orphans
-        When ``None``, use the `copy_inputs` value.
-        When ``True``, new orphans nodes are created.
-        When ``False``, original orphans nodes are reused in the new graph.
-    clone_inner_graphs : bool
-        If ``True``, clone `HasInnerGraph` `Op`\s and their inner-graphs.
-
-    Returns
-    -------
-    The inputs and outputs of that copy.
-
-    Notes
-    -----
-
-    A constant, if in the `inputs` list is not an orphan. So it will be copied
-    conditional on the `copy_inputs` parameter; otherwise, it will be copied
-    conditional on the `copy_orphans` parameter.
-
-    """
-    if copy_orphans is None:
-        copy_orphans = copy_inputs
-    equiv = clone_get_equiv(
-        inputs,
-        outputs,
-        copy_inputs=copy_inputs,
-        copy_orphans=copy_orphans,
-        clone_inner_graphs=clone_inner_graphs,
-    )
-    return [cast(Variable, equiv[input]) for input in inputs], [
-        cast(Variable, equiv[output]) for output in outputs
-    ]
-
-
-def clone_node_and_cache(
-    node: Apply,
-    clone_d: dict[Union[Apply, Variable, "Op"], Union[Apply, Variable, "Op"]],
-    clone_inner_graphs=False,
-    **kwargs,
-) -> Apply | None:
-    """Clone an `Apply` node and cache the results in `clone_d`.
-
-    This function handles `Op` clones that are generated by inner-graph
-    cloning.
-
-    Returns
-    -------
-    ``None`` if all of `node`'s outputs are already in `clone_d`; otherwise,
-    return the clone of `node`.
-
-    """
-    if all(out in clone_d for out in node.outputs):
-        # If all of `node`'s outputs already have replacements or clones in
-        # `clone_d`, then there's likely no need to clone it
-        return None
-
-    # Use a cached `Op` clone when available
-    new_op: Op | None = cast(Optional["Op"], clone_d.get(node.op))
-
-    cloned_inputs: list[Variable] = [cast(Variable, clone_d[i]) for i in node.inputs]
-
-    new_node = node.clone_with_new_inputs(
-        cloned_inputs,
-        # Only clone inner-graph `Op`s when there isn't a cached clone (and
-        # when `clone_inner_graphs` is enabled)
-        clone_inner_graph=clone_inner_graphs if new_op is None else False,
-        **kwargs,
-    )
-
-    if new_op:
-        # If we didn't clone the inner-graph `Op` above, because
-        # there was a cached version, set the cloned `Apply` to use
-        # the cached clone `Op`
-        new_node.op = new_op
-
-    clone_d[node] = new_node
-
-    if new_node.op is not node.op:
-        clone_d.setdefault(node.op, new_node.op)
-
-    for old_o, new_o in zip(node.outputs, new_node.outputs, strict=True):
-        clone_d.setdefault(old_o, new_o)
-
-    return new_node
-
-
-def clone_get_equiv(
-    inputs: Iterable[Variable],
-    outputs: Reversible[Variable],
-    copy_inputs: bool = True,
-    copy_orphans: bool = True,
-    memo: (
-        dict[Union[Apply, Variable, "Op"], Union[Apply, Variable, "Op"]] | None
-    ) = None,
-    clone_inner_graphs: bool = False,
-    **kwargs,
-) -> dict[Union[Apply, Variable, "Op"], Union[Apply, Variable, "Op"]]:
-    r"""Clone the graph between `inputs` and `outputs` and return a map of the cloned objects.
-
-    This function works by recursively cloning inputs and rebuilding a directed
-    graph from the inputs up.
-
-    If `memo` already contains entries for some of the objects in the graph,
-    those objects are replaced with their values in `memo` and *not*
-    unnecessarily cloned.
-
-    Parameters
-    ----------
-    inputs
-        Inputs of the graph to be cloned.
-    outputs
-        Outputs of the graph to be cloned.
-    copy_inputs
-        ``True`` means to create the cloned graph from cloned input nodes.
-        ``False`` means to clone a graph that is rooted at the original input
-        nodes.  `Constant`\s are *not* cloned.
-    copy_orphans
-        When ``True``, inputs with no owners are cloned.  When ``False``,
-        original inputs are reused in the new graph.  Cloning is *not*
-        performed for `Constant`\s.
-    memo
-        Optionally start with a partly-filled dictionary for the return value.
-        If a dictionary is passed, this function will work in-place on that
-        dictionary and return it.
-    clone_inner_graphs
-        If ``True``, clone `HasInnerGraph` `Op`\s and their inner-graphs.
-    kwargs
-        Keywords passed to `Apply.clone_with_new_inputs`.
-
-    """
-    if memo is None:
-        memo = {}
-
-    # clone the inputs if necessary
-    for input in inputs:
-        if not isinstance(input, Constant) and copy_inputs:
-            cpy = input.clone()
-            cpy.owner = None
-            cpy.index = None
-            memo.setdefault(input, cpy)
+def apply_toposort(
+    output_nodes: Iterable[Apply] = (),
+    blockers: Iterable[Apply] = (),
+) -> Generator[Apply]:
+    computed = {None, *blockers}
+    todo = list(output_nodes)
+    while todo:
+        cur = todo[-1]
+        if cur in computed:
+            todo.pop()
+            continue
+        # Since computed includes None we don't need to filter it in this check
+        if all(i.owner in computed for i in cur.inputs):
+            computed.add(cur)
+            yield todo.pop()
         else:
-            memo.setdefault(input, input)
-
-    # go through the inputs -> outputs graph cloning as we go
-    for apply in io_toposort(inputs, outputs):
-        for input in apply.inputs:
-            if input not in memo:
-                if not isinstance(input, Constant) and copy_orphans:
-                    cpy = input.clone()
-                    memo[input] = cpy
-                else:
-                    memo[input] = input
-
-        clone_node_and_cache(
-            apply, memo, clone_inner_graphs=clone_inner_graphs, **kwargs
-        )
-
-    # finish up by cloning any remaining outputs (it can happen)
-    for output in outputs:
-        if output not in memo:
-            memo[output] = output.clone()
-
-    return memo
-
-
-@overload
-def general_toposort(
-    outputs: Iterable[T],
-    deps: None,
-    compute_deps_cache: Callable[[T], OrderedSet | list[T] | None],
-    deps_cache: dict[T, list[T]] | None,
-    clients: dict[T, list[T]] | None,
-) -> list[T]: ...
-
-
-@overload
-def general_toposort(
-    outputs: Iterable[T],
-    deps: Callable[[T], OrderedSet | list[T]],
-    compute_deps_cache: None,
-    deps_cache: None,
-    clients: dict[T, list[T]] | None,
-) -> list[T]: ...
+            todo.extend(i.owner for i in cur.inputs if i.owner is not None)
 
 
 def general_toposort(
     outputs: Iterable[T],
     deps: Callable[[T], OrderedSet | list[T]] | None,
-    compute_deps_cache: Callable[[T], OrderedSet | list[T] | None] | None = None,
-    deps_cache: dict[T, list[T]] | None = None,
-    clients: dict[T, list[T]] | None = None,
 ) -> list[T]:
     """Perform a topological sort of all nodes starting from a given node.
 
@@ -1430,94 +1399,63 @@ def general_toposort(
     ----------
     deps : callable
         A Python function that takes a node as input and returns its dependence.
-    compute_deps_cache : optional
-        If provided, `deps_cache` should also be provided. This is a function like
-        `deps`, but that also caches its results in a ``dict`` passed as `deps_cache`.
-    deps_cache : dict
-        A ``dict`` mapping nodes to their children.  This is populated by
-        `compute_deps_cache`.
-    clients : dict
-        If a ``dict`` is passed, it will be filled with a mapping of
-        nodes-to-clients for each node in the subgraph.
 
     Notes
     -----
 
-    ``deps(i)`` should behave like a pure function (no funny business with
-    internal state).
-
-    ``deps(i)`` will be cached by this function (to be fast).
+    ``deps(i)`` should behave like a pure function (no funny business with internal state).
 
     The order of the return value list is determined by the order of nodes
     returned by the `deps` function.
 
-    The second option removes a Python function call, and allows for more
-    specialized code, so it can be faster.
-
     """
-    if compute_deps_cache is None:
-        if deps_cache is None:
-            deps_cache = {}
 
-        def _compute_deps_cache_(io):
-            if io not in deps_cache:
-                d = deps(io)
+    # Cache the dependencies (ancestors) as we iterate over the nodes with the deps function
+    deps_cache = {}
 
-                if d:
-                    if not isinstance(d, list | OrderedSet):
-                        raise TypeError(
-                            "Non-deterministic collections found; make"
-                            " toposort non-deterministic."
-                        )
-                    deps_cache[io] = list(d)
-                else:
-                    deps_cache[io] = None
+    def compute_deps_cache(obj, deps_cache=deps_cache):
+        if obj in deps_cache:
+            return deps_cache[obj]
+        d = deps_cache[obj] = deps(obj) or []
+        return d
 
-                return d
-            else:
-                return deps_cache[io]
-
-        _compute_deps_cache = _compute_deps_cache_
-
-    else:
-        _compute_deps_cache = compute_deps_cache
-
-    if deps_cache is None:
-        raise ValueError("deps_cache cannot be None")
-
-    search_res: list[NodeAndChildren] = cast(
-        list[NodeAndChildren],
-        list(walk(outputs, _compute_deps_cache, bfs=False, return_children=True)),
+    search_res = tuple(
+        walk(outputs, compute_deps_cache, bfs=False, return_children=True)
     )
 
-    _clients: dict[T, list[T]] = {}
+    clients: dict[T, list[T]] = {}
     sources: deque[T] = deque()
-    search_res_len = len(search_res)
-    for snode, children in search_res:
-        if children:
-            for child in children:
-                _clients.setdefault(child, []).append(snode)
-        if not deps_cache.get(snode):
-            sources.append(snode)
-
-    if clients is not None:
-        clients.update(_clients)
+    search_res_len = 0
+    for node, children in search_res:
+        search_res_len += 1
+        for child in children:
+            clients.setdefault(child, []).append(node)
+        if not deps_cache[node]:
+            # Add nodes without dependencies to the stack
+            sources.append(node)
 
     rset: set[T] = set()
     rlist: list[T] = []
-    while sources:
-        node: T = sources.popleft()
-        if node not in rset:
-            rlist.append(node)
-            rset.add(node)
-            for client in _clients.get(node, []):
-                d = [a for a in deps_cache[client] if a is not node]
-                deps_cache[client] = d
-                if not d:
-                    sources.append(client)
+    try:
+        while True:
+            node: T = sources.popleft()
+            if node not in rset:
+                rlist.append(node)
+                rset.add(node)
+                # Iterate over each client node (that is, it depends on the current node)
+                for client in clients.get(node, []):
+                    # Remove itself from the dependent (ancestor) list of each client
+                    d = deps_cache[client] = [
+                        a for a in deps_cache[client] if a is not node
+                    ]
+                    if not d:
+                        # If there are no dependencies left to visit for this node, add it to the stack
+                        sources.append(client)
+    except IndexError:
+        pass
 
     if len(rlist) != search_res_len:
-        raise ValueError("graph contains cycles")
+        raise ValueError("Graph contains cycles")
 
     return rlist
 
@@ -1526,9 +1464,14 @@ def io_toposort(
     inputs: Iterable[Variable],
     outputs: Reversible[Variable],
     orderings: dict[Apply, list[Apply]] | None = None,
-    clients: dict[Variable, list[Variable]] | None = None,
 ) -> list[Apply]:
-    """Perform topological sort from input and output nodes.
+    """Perform topological of nodes between input and output variables.
+
+    Notes
+    -----
+    If sorting from root or single-output node variables, without orderings or clients,
+    it's slightly faster to use `list(apply_toposort((o.owner for o in outputs)))` instead,
+    as the individual variables can be ignored
 
     Parameters
     ----------
@@ -1538,99 +1481,55 @@ def io_toposort(
         Graph outputs.
     orderings : dict
         Keys are `Apply` instances, values are lists of `Apply` instances.
-    clients : dict
-        If provided, it will be filled with mappings of nodes-to-clients for
-        each node in the subgraph that is sorted.
-
     """
-    if not orderings and clients is None:  # ordering can be None or empty dict
-        # Specialized function that is faster when more then ~10 nodes
-        # when no ordering.
-
-        # Do a new stack implementation with the vm algo.
-        # This will change the order returned.
+    if not orderings:
         computed = set(inputs)
-        todo = [o.owner for o in reversed(outputs) if o.owner]
+        todo = [o.owner for o in outputs if o.owner is not None]
         order = []
         while todo:
-            cur = todo.pop()
-            if all(out in computed for out in cur.outputs):
+            cur = todo[-1]
+            # It's faster to short circuit on the first output, as most nodes will have all edges non-computed
+            # Starting the `all` iterator has a non-negligeable cost
+            if cur.outputs[0] in computed and all(
+                out in computed for out in cur.outputs[1:]
+            ):
+                todo.pop()
                 continue
             if all(i in computed or i.owner is None for i in cur.inputs):
                 computed.update(cur.outputs)
-                order.append(cur)
+                order.append(todo.pop())
             else:
-                todo.append(cur)
                 todo.extend(
-                    i.owner for i in cur.inputs if (i.owner and i not in computed)
+                    i.owner
+                    for i in cur.inputs
+                    if ((i.owner is not None) and (i not in computed))
                 )
         return order
 
-    iset = set(inputs)
-
-    if not orderings:  # ordering can be None or empty dict
-        # Specialized function that is faster when no ordering.
-        # Also include the cache in the function itself for speed up.
-
-        deps_cache: dict = {}
-
-        def compute_deps_cache(obj):
-            if obj in deps_cache:
-                return deps_cache[obj]
-            rval = []
-            if obj not in iset:
-                if isinstance(obj, Variable):
-                    if obj.owner:
-                        rval = [obj.owner]
-                elif isinstance(obj, Apply):
-                    rval = list(obj.inputs)
-                if rval:
-                    deps_cache[obj] = list(rval)
-                else:
-                    deps_cache[obj] = rval
-            else:
-                deps_cache[obj] = rval
-            return rval
-
-        topo = general_toposort(
-            outputs,
-            deps=None,
-            compute_deps_cache=compute_deps_cache,
-            deps_cache=deps_cache,
-            clients=clients,
-        )
-
     else:
-        # the inputs are used only here in the function that decides what
-        # 'predecessors' to explore
-        def compute_deps(obj):
-            rval = []
-            if obj not in iset:
-                if isinstance(obj, Variable):
-                    if obj.owner:
-                        rval = [obj.owner]
-                elif isinstance(obj, Apply):
-                    rval = list(obj.inputs)
-                rval.extend(orderings.get(obj, []))
+        # the inputs are used to decide where to stop expanding
+        def compute_deps(obj, input_set=set(inputs), orderings=orderings):
+            if obj in input_set:
+                return []
+
+            if isinstance(obj, Apply):
+                return [*obj.inputs, *orderings.get(obj, [])]
             else:
-                assert not orderings.get(obj, None)
-            return rval
+                node = obj.owner
+                if node is None:
+                    return orderings.get(obj, [])
+                else:
+                    return [node, *orderings.get(node, [])]
 
-        topo = general_toposort(
-            outputs,
-            deps=compute_deps,
-            compute_deps_cache=None,
-            deps_cache=None,
-            clients=clients,
-        )
-    return [o for o in topo if isinstance(o, Apply)]
-
-
-default_leaf_formatter = str
+        return [
+            node
+            for node in general_toposort(outputs, deps=compute_deps)
+            if isinstance(node, Apply)
+        ]
 
 
-def default_node_formatter(op, argstrings):
-    return f"{op.op}({', '.join(argstrings)})"
+def variable_toposort(graphs: Reversible[Variable], blockers):
+    yield from io_toposort(blockers, graphs)
 
 
 def io_connection_pattern(inputs, outputs):
@@ -1698,95 +1597,6 @@ def io_connection_pattern(inputs, outputs):
     return global_connection_pattern
 
 
-def op_as_string(
-    i, op, leaf_formatter=default_leaf_formatter, node_formatter=default_node_formatter
-):
-    """Return a function that returns a string representation of the subgraph between `i` and :attr:`op.inputs`"""
-    strs = as_string(i, op.inputs, leaf_formatter, node_formatter)
-    return node_formatter(op, strs)
-
-
-def as_string(
-    inputs: list[Variable],
-    outputs: list[Variable],
-    leaf_formatter=default_leaf_formatter,
-    node_formatter=default_node_formatter,
-) -> list[str]:
-    r"""Returns a string representation of the subgraph between `inputs` and `outputs`.
-
-    Parameters
-    ----------
-    inputs : list
-        Input `Variable`\s.
-    outputs : list
-        Output `Variable`\s.
-    leaf_formatter : callable
-        Takes a `Variable` and returns a string to describe it.
-    node_formatter : callable
-        Takes an `Op` and the list of strings corresponding to its arguments
-        and returns a string to describe it.
-
-    Returns
-    -------
-    list of str
-        Returns a string representation of the subgraph between `inputs` and
-        `outputs`. If the same node is used by several other nodes, the first
-        occurrence will be marked as :literal:`*n -> description` and all
-        subsequent occurrences will be marked as :literal:`*n`, where ``n`` is an id
-        number (ids are attributed in an unspecified order and only exist for
-        viewing convenience).
-
-    """
-    i = set(inputs)
-
-    orph = list(orphans_between(i, outputs))
-
-    multi = set()
-    seen = set()
-    for output in outputs:
-        op = output.owner
-        if op in seen:
-            multi.add(op)
-        else:
-            seen.add(op)
-    for op in applys_between(i, outputs):
-        for input in op.inputs:
-            op2 = input.owner
-            if input in i or input in orph or op2 is None:
-                continue
-            if op2 in seen:
-                multi.add(op2)
-            else:
-                seen.add(input.owner)
-    multi_list = list(multi)
-    done: set = set()
-
-    def multi_index(x):
-        return multi_list.index(x) + 1
-
-    def describe(r):
-        if r.owner is not None and r not in i and r not in orph:
-            op = r.owner
-            idx = op.outputs.index(r)
-            if len(op.outputs) == 1:
-                idxs = ""
-            else:
-                idxs = f"::{idx}"
-            if op in done:
-                return f"*{multi_index(op)}{idxs}"
-            else:
-                done.add(op)
-                s = node_formatter(op, [describe(input) for input in op.inputs])
-                if op in multi_list:
-                    return f"*{multi_index(op)} -> {s}"
-                else:
-                    return s
-        else:
-            return leaf_formatter(r)
-
-    return [describe(output) for output in outputs]
-
-
 def view_roots(node: Variable) -> list[Variable]:
     """Return the leaves from a search through consecutive view-maps."""
     owner = node.owner
@@ -1804,63 +1614,6 @@ def view_roots(node: Variable) -> list[Variable]:
             return [node]
     else:
         return [node]
-
-
-def apply_depends_on(apply: Apply, depends_on: Apply | Collection[Apply]) -> bool:
-    """Determine if any `depends_on` is in the graph given by ``apply``.
-
-    Parameters
-    ----------
-    apply : Apply
-        The Apply node to check.
-    depends_on : Union[Apply, Collection[Apply]]
-        Apply nodes to check dependency on
-
-    Returns
-    -------
-    bool
-
-    """
-    computed = set()
-    todo = [apply]
-    if not isinstance(depends_on, Collection):
-        depends_on = {depends_on}
-    else:
-        depends_on = set(depends_on)
-    while todo:
-        cur = todo.pop()
-        if cur.outputs[0] in computed:
-            continue
-        if all(i in computed or i.owner is None for i in cur.inputs):
-            computed.update(cur.outputs)
-            if cur in depends_on:
-                return True
-        else:
-            todo.append(cur)
-            todo.extend(i.owner for i in cur.inputs if i.owner)
-    return False
-
-
-def variable_depends_on(
-    variable: Variable, depends_on: Variable | Collection[Variable]
-) -> bool:
-    """Determine if any `depends_on` is in the graph given by ``variable``.
-    Parameters
-    ----------
-    variable: Variable
-        Node to check
-    depends_on: Collection[Variable]
-        Nodes to check dependency on
-
-    Returns
-    -------
-    bool
-    """
-    if not isinstance(depends_on, Collection):
-        depends_on = {depends_on}
-    else:
-        depends_on = set(depends_on)
-    return any(interim in depends_on for interim in ancestors([variable]))
 
 
 def equal_computations(
@@ -2063,7 +1816,7 @@ def get_var_by_name(
         return res
 
     results: tuple[Variable, ...] = ()
-    for var in walk(graphs, expand, False):
+    for var in walk(graphs, expand, bfs=False):
         var = cast(Variable, var)
         if target_var_id == var.name or target_var_id == var.auto_name:
             results += (var,)
@@ -2104,3 +1857,184 @@ def replace_nominals_with_dummies(inputs, outputs):
         inputs = [existing_nominal_replacements[i] for i in inputs]
 
     return inputs, outputs
+
+
+def clone(
+    inputs: Sequence[Variable],
+    outputs: Sequence[Variable],
+    copy_inputs: bool = True,
+    copy_orphans: bool | None = None,
+    clone_inner_graphs: bool = False,
+) -> tuple[list[Variable], list[Variable]]:
+    r"""Copies the sub-graph contained between inputs and outputs.
+
+    Parameters
+    ----------
+    inputs
+        Input `Variable`\s.
+    outputs
+        Output `Variable`\s.
+    copy_inputs
+        If ``True``, the inputs will be copied (defaults to ``True``).
+    copy_orphans
+        When ``None``, use the `copy_inputs` value.
+        When ``True``, new orphans nodes are created.
+        When ``False``, original orphans nodes are reused in the new graph.
+    clone_inner_graphs : bool
+        If ``True``, clone `HasInnerGraph` `Op`\s and their inner-graphs.
+
+    Returns
+    -------
+    The inputs and outputs of that copy.
+
+    Notes
+    -----
+
+    A constant, if in the `inputs` list is not an orphan. So it will be copied
+    conditional on the `copy_inputs` parameter; otherwise, it will be copied
+    conditional on the `copy_orphans` parameter.
+
+    """
+    if copy_orphans is None:
+        copy_orphans = copy_inputs
+    equiv = clone_get_equiv(
+        inputs,
+        outputs,
+        copy_inputs=copy_inputs,
+        copy_orphans=copy_orphans,
+        clone_inner_graphs=clone_inner_graphs,
+    )
+    return [cast(Variable, equiv[input]) for input in inputs], [
+        cast(Variable, equiv[output]) for output in outputs
+    ]
+
+
+def clone_node_and_cache(
+    node: Apply,
+    clone_d: dict[Union[Apply, Variable, "Op"], Union[Apply, Variable, "Op"]],
+    clone_inner_graphs=False,
+    **kwargs,
+) -> Apply | None:
+    """Clone an `Apply` node and cache the results in `clone_d`.
+
+    This function handles `Op` clones that are generated by inner-graph
+    cloning.
+
+    Returns
+    -------
+    ``None`` if all of `node`'s outputs are already in `clone_d`; otherwise,
+    return the clone of `node`.
+
+    """
+    if all(out in clone_d for out in node.outputs):
+        # If all of `node`'s outputs already have replacements or clones in
+        # `clone_d`, then there's likely no need to clone it
+        return None
+
+    # Use a cached `Op` clone when available
+    new_op: Op | None = cast(Optional["Op"], clone_d.get(node.op))
+
+    cloned_inputs: list[Variable] = [cast(Variable, clone_d[i]) for i in node.inputs]
+
+    new_node = node.clone_with_new_inputs(
+        cloned_inputs,
+        # Only clone inner-graph `Op`s when there isn't a cached clone (and
+        # when `clone_inner_graphs` is enabled)
+        clone_inner_graph=clone_inner_graphs if new_op is None else False,
+        **kwargs,
+    )
+
+    if new_op:
+        # If we didn't clone the inner-graph `Op` above, because
+        # there was a cached version, set the cloned `Apply` to use
+        # the cached clone `Op`
+        new_node.op = new_op
+
+    clone_d[node] = new_node
+
+    if new_node.op is not node.op:
+        clone_d.setdefault(node.op, new_node.op)
+
+    for old_o, new_o in zip(node.outputs, new_node.outputs, strict=True):
+        clone_d.setdefault(old_o, new_o)
+
+    return new_node
+
+
+def clone_get_equiv(
+    inputs: Iterable[Variable],
+    outputs: Reversible[Variable],
+    copy_inputs: bool = True,
+    copy_orphans: bool = True,
+    memo: (
+        dict[Union[Apply, Variable, "Op"], Union[Apply, Variable, "Op"]] | None
+    ) = None,
+    clone_inner_graphs: bool = False,
+    **kwargs,
+) -> dict[Union[Apply, Variable, "Op"], Union[Apply, Variable, "Op"]]:
+    r"""Clone the graph between `inputs` and `outputs` and return a map of the cloned objects.
+
+    This function works by recursively cloning inputs and rebuilding a directed
+    graph from the inputs up.
+
+    If `memo` already contains entries for some of the objects in the graph,
+    those objects are replaced with their values in `memo` and *not*
+    unnecessarily cloned.
+
+    Parameters
+    ----------
+    inputs
+        Inputs of the graph to be cloned.
+    outputs
+        Outputs of the graph to be cloned.
+    copy_inputs
+        ``True`` means to create the cloned graph from cloned input nodes.
+        ``False`` means to clone a graph that is rooted at the original input
+        nodes.  `Constant`\s are *not* cloned.
+    copy_orphans
+        When ``True``, inputs with no owners are cloned.  When ``False``,
+        original inputs are reused in the new graph.  Cloning is *not*
+        performed for `Constant`\s.
+    memo
+        Optionally start with a partly-filled dictionary for the return value.
+        If a dictionary is passed, this function will work in-place on that
+        dictionary and return it.
+    clone_inner_graphs
+        If ``True``, clone `HasInnerGraph` `Op`\s and their inner-graphs.
+    kwargs
+        Keywords passed to `Apply.clone_with_new_inputs`.
+
+    """
+    if memo is None:
+        memo = {}
+
+    # clone the inputs if necessary
+    for input in inputs:
+        if not isinstance(input, Constant) and copy_inputs:
+            cpy = input.clone()
+            cpy.owner = None
+            cpy.index = None
+            memo.setdefault(input, cpy)
+        else:
+            memo.setdefault(input, input)
+
+    # go through the inputs -> outputs graph cloning as we go
+    for apply in io_toposort(inputs, outputs):
+        for input in apply.inputs:
+            if input not in memo:
+                if not isinstance(input, Constant) and copy_orphans:
+                    cpy = input.clone()
+                    memo[input] = cpy
+                else:
+                    memo[input] = input
+
+        clone_node_and_cache(
+            apply, memo, clone_inner_graphs=clone_inner_graphs, **kwargs
+        )
+
+    # finish up by cloning any remaining outputs (it can happen)
+    for output in outputs:
+        if output not in memo:
+            memo[output] = output.clone()
+
+    return memo

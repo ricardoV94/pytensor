@@ -20,9 +20,9 @@ from pytensor.graph.basic import (
     Variable,
     ancestors,
     apply_depends_on,
+    apply_toposort,
     equal_computations,
     graph_inputs,
-    io_toposort,
 )
 from pytensor.graph.destroyhandler import DestroyHandler
 from pytensor.graph.features import ReplaceValidate
@@ -225,7 +225,7 @@ def scan_push_out_non_seq(fgraph, node):
 
     node_inputs, node_outputs = node.op.inner_inputs, node.op.inner_outputs
 
-    local_fgraph_topo = io_toposort(node_inputs, node_outputs)
+    local_fgraph_topo = apply_toposort(node_outputs)
     local_fgraph_outs_set = set(node_outputs)
     local_fgraph_outs_map = {v: k for k, v in enumerate(node_outputs)}
 
@@ -435,7 +435,7 @@ def scan_push_out_seq(fgraph, node):
 
     node_inputs, node_outputs = node.op.inner_inputs, node.op.inner_outputs
 
-    local_fgraph_topo = io_toposort(node_inputs, node_outputs)
+    local_fgraph_topo = apply_toposort(node_outputs)
     local_fgraph_outs_set = set(node_outputs)
     local_fgraph_outs_map = {v: k for k, v in enumerate(node_outputs)}
 
@@ -847,10 +847,8 @@ def scan_push_out_add(fgraph, node):
         node.inputs, node.outputs, op.inner_inputs, op.inner_outputs, op.info
     )
 
-    clients = {}
-    local_fgraph_topo = io_toposort(
-        args.inner_inputs, args.inner_outputs, clients=clients
-    )
+    clients = op.fgraph.clients
+    local_fgraph_topo = op.fgraph.toposort()
 
     for nd in local_fgraph_topo:
         if (

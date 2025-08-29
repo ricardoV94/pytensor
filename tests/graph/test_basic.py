@@ -12,7 +12,9 @@ from pytensor.graph.basic import (
     NominalVariable,
     Variable,
     ancestors,
+    apply_ancestors,
     apply_depends_on,
+    apply_toposort,
     applys_between,
     as_string,
     clone,
@@ -25,6 +27,7 @@ from pytensor.graph.basic import (
     io_toposort,
     orphans_between,
     truncated_graph_inputs,
+    variable_ancestors,
     variable_depends_on,
     vars_between,
     walk,
@@ -328,6 +331,31 @@ class TestToposort:
             v1.owner,
             out.owner,
         }
+
+    @pytest.mark.parametrize(
+        "toposort_func",
+        [
+            lambda x: list(variable_ancestors([x])),
+            lambda x: list(apply_ancestors([x.owner])),
+            lambda x: io_toposort([], [x]),
+            lambda x: io_toposort([], [x], orderings={x: []}),
+            lambda x: list(apply_toposort([x.owner])),
+        ],
+        ids=[
+            "variable_ancestors",
+            "apply_ancestors",
+            "variable_toposort",
+            "variable_toposort_with_orderings",
+            "apply_toposort",
+        ],
+    )
+    def test_benchmark(self, toposort_func, benchmark):
+        r1 = MyVariable(1)
+        out = r1
+        for i in range(50):
+            out = MyOp(out, out)
+
+        benchmark(toposort_func, out)
 
 
 class TestEval:
