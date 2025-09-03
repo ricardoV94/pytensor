@@ -602,13 +602,14 @@ class MergeFeature(Feature):
             # using `node.inputs[0]` will make us look at more nodes on
             # average, so by picking the smallest clients list, we might speed
             # things up?
-
-            clients = sorted(
-                (fgraph.clients[inp] for inp in node.inputs), key=lambda x: len(x)
-            )[0]
-            assert len(clients) > 0
-
-            merge_candidates = [c for c, i in clients if c in self.nodes_seen]
+            fgraph_clients = fgraph.clients
+            merge_candidates = [
+                c
+                for c, _ in sorted(
+                    (fgraph_clients[inp] for inp in node.inputs), key=lambda x: len(x)
+                )[0]
+                if c in self.nodes_seen
+            ]
         else:
             # If two nodes have no input, but perform the same operation,
             # they are not always constant-folded, so we want to merge them.
@@ -624,7 +625,7 @@ class MergeFeature(Feature):
 
             inputs_match = all(
                 node_in is cand_in
-                for node_in, cand_in in zip(node.inputs, candidate.inputs, strict=True)
+                for node_in, cand_in in zip(node.inputs, candidate.inputs)
             )
 
             if inputs_match and node.op == candidate.op:
