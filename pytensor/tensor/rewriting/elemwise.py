@@ -567,8 +567,6 @@ class FusionOptimizer(GraphRewriter):
         return scalar_inputs, scalar_outputs
 
     def apply(self, fgraph):
-        nb_replacement = 0
-
         if fgraph.profile:
             validate_before = fgraph.profile.validate_time
             callbacks_before = fgraph.execute_callbacks_times.copy()
@@ -923,6 +921,8 @@ class FusionOptimizer(GraphRewriter):
                         starting_nodes=starting_nodes,
                     )
 
+        nb_fused = 0
+        nb_replacement = 0
         for inputs, outputs in find_next_fuseable_subgraph(fgraph):
             if (len(inputs) + len(outputs)) > max_operands:
                 warn(
@@ -941,11 +941,13 @@ class FusionOptimizer(GraphRewriter):
                 if old_out.name:
                     composite_out.name = old_out.name
 
+            starting_nodes = len(fgraph.apply_nodes)
             fgraph.replace_all_validate(
                 list(zip(outputs, composite_outputs, strict=True)),
                 reason=self.__class__.__name__,
             )
-            nb_replacement += 1
+            nb_fused += 1
+            nb_replacement += (starting_nodes - len(fgraph.apply_nodes)) + 1
 
         if fgraph.profile:
             validate_time = fgraph.profile.validate_time - validate_before
@@ -963,7 +965,7 @@ class FusionOptimizer(GraphRewriter):
 
         return (
             self,
-            1,  # nb_iter
+            nb_fused,
             nb_replacement,
             0,  # nb_inconsintency_replace
             validate_time,
@@ -976,7 +978,7 @@ class FusionOptimizer(GraphRewriter):
     def print_profile(stream, prof, level=0):
         blanc = "    " * level
         print(blanc, "FusionOptimizer", file=stream)
-        print(blanc, " nb_iter", prof[1], file=stream)
+        print(blanc, " nb_fused", prof[1], file=stream)
         print(blanc, " nb_replacement", prof[2], file=stream)
         print(blanc, " nb_inconsistency_replace", prof[3], file=stream)
         print(blanc, " validate_time", prof[4], file=stream)
