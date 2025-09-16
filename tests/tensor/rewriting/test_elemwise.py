@@ -1370,7 +1370,7 @@ class TestFusion:
         "graph_fn, n, expected_n_repl",
         [
             ("diamond_graph", None, (1, 4)),
-            ("large_fuseable_graph", 1, (6, 36)),
+            ("large_fuseable_graph", 1, (7, 36)),
             ("deep_small_kernels", 20, (20, 60)),
         ],
     )
