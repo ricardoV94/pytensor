@@ -2,9 +2,10 @@ import abc
 import itertools
 import operator
 import sys
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Generator, Sequence
 from functools import cache, reduce
+from heapq import heapify, heappop, heappush
 from operator import or_
 from warnings import warn
 
@@ -631,11 +632,11 @@ class FusionOptimizer(GraphRewriter):
                     # Not a sink node
                     continue
 
-                if not fuseable_inputs.get(starting_var):
+                # It's never the case that a variable is in fuseable_inputs without entries
+                # Only clients are partially updated during exploration
+                if starting_var not in fuseable_inputs:
                     # Not fuseable with any of its inputs
                     continue
-
-                fuseable_variables_to_visit_next = deque(fuseable_inputs[starting_var])
 
                 subgraph_inputs = OrderedSet(starting_var.owner.inputs)
                 subgraph_inputs_ancestors_bitset = reduce(
@@ -652,16 +653,20 @@ class FusionOptimizer(GraphRewriter):
                 # largest issue to watch out is for "non-convexity", where
                 # some nodes in the set may be connected to each other via a path
                 # that cannot be made part of the set (due to unfuseable nodes in between)
-                # TODO: Keep two ordered quesues, one for ancestors, one for clients
+
+                # We keep an ordered queue, for faster convergence
+                # We always want to visit ancestors before clients
                 # For ancestors we want to visit the larger toposort index firsts (have more dependencies)
                 # whereas for clients we want to visit the smaller toposort index first (have less dependencies)
-                # As this should result in the fastest convergence
+                fuseable_variables_to_visit_next = [
+                    (toposort_index[v], v) for v in fuseable_inputs[starting_var]
+                ]
+                heapify(fuseable_variables_to_visit_next)
                 while fuseable_variables_to_visit_next:
-                    next_var = fuseable_variables_to_visit_next.popleft()
-                    next_var_bit = toposort_index[next_var]
+                    next_var_bit, next_var = heappop(fuseable_variables_to_visit_next)
 
                     if next_var_bit & all_subgraphs_bitset:
-                        # Already part of a previous subgraph
+                        # Already part of a subgraph
                         continue
 
                     if next_var in subgraph_inputs:
@@ -723,12 +728,12 @@ class FusionOptimizer(GraphRewriter):
                             )
 
                     # Explore inputs and clients of new node next
-                    fuseable_variables_to_visit_next.extendleft(
-                        fuseable_inputs.get(next_var, ())
-                    )
-                    fuseable_variables_to_visit_next.extend(
-                        fuseable_clients.get(next_var, ())
-                    )
+                    for v in fuseable_inputs.get(next_var, ()):
+                        if not ((v_bitset := toposort_index[v]) & all_subgraphs_bitset):
+                            heappush(fuseable_variables_to_visit_next, (v_bitset, v))
+                    for v in fuseable_clients.get(next_var, ()):
+                        if not ((v_bitset := toposort_index[v]) & all_subgraphs_bitset):
+                            heappush(fuseable_variables_to_visit_next, (v_bitset, v))
 
                 if len(subgraph_variables) > 1:
                     # We found a subgraph of at least two nodes
@@ -748,7 +753,10 @@ class FusionOptimizer(GraphRewriter):
                         toposort_index[var] for var in subgraph_outputs
                     )
                     subgraphs.append(
-                        (min_toposort_index, (subgraph_inputs, subgraph_outputs))
+                        (
+                            min_toposort_index,
+                            (subgraph_inputs, subgraph_outputs),
+                        )
                     )
 
                 # Update fuseable clients, inputs can no longer be fused with graph variables
