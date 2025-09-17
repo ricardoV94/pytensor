@@ -569,15 +569,17 @@ class FusionOptimizer(GraphRewriter):
                         )
                     return False
 
-            fuseable_inputs: defaultdict[Variable, list[Variable]] = defaultdict(list)
-            fuseable_clients: defaultdict[Variable, list[Variable]] = defaultdict(list)
+            fuseable_ancestors: defaultdict[Apply, list[Apply]] = defaultdict(list)
+            fuseable_clients: defaultdict[Apply, set[Apply]] = defaultdict(set)
             for out, clients in fg.clients.items():
+                out_node = out.owner
+                if out_node is None:
+                    continue
+
                 if not (
-                    out.owner is not None
-                    and isinstance(out.owner.op, Elemwise)
-                    # and not isinstance(out.owner.op.scalar_op, ps.Composite)
-                    and len(out.owner.outputs) == 1
-                    and elemwise_scalar_op_has_c_code(out.owner)
+                    len(out_node.outputs) == 1
+                    and isinstance(out_node.op, Elemwise)
+                    and elemwise_scalar_op_has_c_code(out_node)
                 ):
                     continue
 
@@ -590,62 +592,54 @@ class FusionOptimizer(GraphRewriter):
                         and out_bcast == client.outputs[0].type.broadcastable
                         and elemwise_scalar_op_has_c_code(client)
                     ):
-                        client_out = client.outputs[0]
-                        fuseable_clients[out].append(client_out)
-                        fuseable_inputs[client_out].append(out)
+                        fuseable_clients[out_node].add(client)
+                        fuseable_ancestors[client].append(out_node)
 
             if not fuseable_clients:
                 return None
 
-            toposort_index = {
-                out: 1 << i
-                for i, node in enumerate(fgraph.toposort())
-                for out in node.outputs
-            }
+            toposort_index = {node: 1 << i for i, node in enumerate(fgraph.toposort())}
 
             # Create a bitset of ancestors for each node
             # Each variable is represented by the bit of its owner node in the toposort
             # With two variables {a, b, c} owned by nodes {A, B, C}, where a is an input of b, and b an input of c,
             # the ancestors bitset is {A: 0b001, B: 0b011, C: 0b111}
-            ancestors_bitset = {}
-            ancestors_bitset_with_self = {}
-            for var, var_bit in toposort_index.items():
-                ancestors_bitset[var] = var_ancestors_bitset = reduce(
+            ancestors_bitset = {None: 0}
+            ancestors_bitset_with_self = {None: 0}
+            for node, node_bit in toposort_index.items():
+                ancestors_bitset[node] = node_ancestors_bitset = reduce(
                     or_,
-                    (
-                        ancestors_bitset_with_self.get(inp, 0)
-                        for inp in var.owner.inputs
-                    ),
+                    (ancestors_bitset_with_self[inp.owner] for inp in node.inputs),
                 )
-                ancestors_bitset_with_self[var] = var_ancestors_bitset | var_bit
+                ancestors_bitset_with_self[node] = node_ancestors_bitset | node_bit
             del ancestors_bitset_with_self
+            toposort_index[None] = 0  # handle root nodes gracefully
 
             subgraphs: list[tuple[OrderedSet[Variable], list[Variable]]] = []
             all_subgraphs_bitset = 0
             # Start exploring from sink nodes
-            for starting_var, starting_bit in reversed(toposort_index.items()):
+            for starting_node, starting_bit in reversed(toposort_index.items()):
                 if starting_bit & all_subgraphs_bitset:
                     # Already part of a previous subgraph
                     continue
 
-                if fuseable_clients.get(starting_var):
-                    # Not a sink node
-                    continue
-
                 # It's never the case that a variable is in fuseable_inputs without entries
                 # Only clients are partially updated during exploration
-                if starting_var not in fuseable_inputs:
-                    # Not fuseable with any of its inputs
+                if (
+                    starting_node in fuseable_clients
+                    or starting_node not in fuseable_ancestors
+                ):
+                    # Not a sink,
+                    # and/or not fuseable with any of its inputs
                     continue
 
-                subgraph_inputs = OrderedSet(starting_var.owner.inputs)
+                subgraph_inputs = OrderedSet(starting_node.inputs)
                 subgraph_inputs_ancestors_bitset = reduce(
                     or_,
-                    (ancestors_bitset.get(inp, 0) for inp in subgraph_inputs),
+                    (ancestors_bitset[inp.owner] for inp in subgraph_inputs),
                 )
-                subgraph_variables = [starting_var]
-                subgraph_variables_bitset = starting_bit
-                all_subgraphs_bitset |= starting_bit
+                subgraph_nodes = [starting_node]
+                subgraph_nodes_bitset = starting_bit
 
                 # We now try to expand as much as possible towards the potentially
                 # fuseable ancestors and clients to detect the largest possible
@@ -659,15 +653,17 @@ class FusionOptimizer(GraphRewriter):
                 # For ancestors we want to visit the larger toposort index firsts (have more dependencies)
                 # whereas for clients we want to visit the smaller toposort index first (have less dependencies)
                 fuseable_variables_to_visit_next = [
-                    (toposort_index[v], v) for v in fuseable_inputs[starting_var]
+                    (toposort_index[v], v) for v in fuseable_ancestors[starting_node]
                 ]
                 heapify(fuseable_variables_to_visit_next)
                 while fuseable_variables_to_visit_next:
-                    next_var_bit, next_var = heappop(fuseable_variables_to_visit_next)
+                    next_node_bit, next_node = heappop(fuseable_variables_to_visit_next)
 
-                    if next_var_bit & all_subgraphs_bitset:
-                        # Already part of a subgraph
+                    if next_node_bit & subgraph_nodes_bitset:
+                        # Already part of the subgraph
                         continue
+
+                    next_var = next_node.outputs[0]
 
                     if next_var in subgraph_inputs:
                         # It's an input of S
@@ -677,21 +673,20 @@ class FusionOptimizer(GraphRewriter):
                         # For that, other inputs of S must not depend on it
                         # Since a variable does not depend on itself,
                         # the presence in the inputs_ancestors must mean another input depends on it
-                        if next_var_bit & subgraph_inputs_ancestors_bitset:
+                        if next_node_bit & subgraph_inputs_ancestors_bitset:
                             continue
                         else:
                             # If so move it from inputs of S to variables of S
-                            subgraph_variables.append(next_var)
-                            subgraph_variables_bitset |= next_var_bit
-                            all_subgraphs_bitset |= next_var_bit
+                            subgraph_nodes.append(next_node)
+                            subgraph_nodes_bitset |= next_node_bit
                             subgraph_inputs.remove(next_var)
-                            subgraph_inputs.update(next_var.owner.inputs)
+                            subgraph_inputs.update(next_node.inputs)
                             # I don't think there's a way to recompute this incrementally faster
                             # without having some counting representation
                             subgraph_inputs_ancestors_bitset = reduce(
                                 or_,
                                 (
-                                    ancestors_bitset.get(inp, 0)
+                                    ancestors_bitset[inp.owner]
                                     for inp in subgraph_inputs
                                 ),
                             )
@@ -704,70 +699,67 @@ class FusionOptimizer(GraphRewriter):
                         # For that none of the inputs not in S should depend on S
                         new_inputs = []
                         ancestors_of_new_required_inputs_bitset = 0
-                        for inp in next_var.owner.inputs:
-                            if not (
-                                toposort_index.get(inp, 0) & subgraph_variables_bitset
-                            ):
+                        for inp in next_node.inputs:
+                            if not (toposort_index[inp.owner] & subgraph_nodes_bitset):
                                 new_inputs.append(inp)
                                 ancestors_of_new_required_inputs_bitset |= (
-                                    ancestors_bitset.get(inp, 0)
+                                    ancestors_bitset[inp.owner]
                                 )
                         if (
                             ancestors_of_new_required_inputs_bitset
-                            & subgraph_variables_bitset
+                            & subgraph_nodes_bitset
                         ):
                             continue
                         else:
                             # If so, add it to the subgraph variables
-                            subgraph_variables.append(next_var)
-                            subgraph_variables_bitset |= next_var_bit
-                            all_subgraphs_bitset |= next_var_bit
+                            subgraph_nodes.append(next_node)
+                            subgraph_nodes_bitset |= next_node_bit
                             subgraph_inputs.update(new_inputs)
                             subgraph_inputs_ancestors_bitset |= (
                                 ancestors_of_new_required_inputs_bitset
                             )
 
                     # Explore inputs and clients of new node next
-                    for v in fuseable_inputs.get(next_var, ()):
-                        if not ((v_bitset := toposort_index[v]) & all_subgraphs_bitset):
+                    for v in fuseable_ancestors.get(next_node, ()):
+                        if not (
+                            (v_bitset := toposort_index[v]) & subgraph_nodes_bitset
+                        ):
                             heappush(fuseable_variables_to_visit_next, (v_bitset, v))
-                    for v in fuseable_clients.get(next_var, ()):
-                        if not ((v_bitset := toposort_index[v]) & all_subgraphs_bitset):
+                    for v in fuseable_clients.get(next_node, ()):
+                        if not (
+                            (v_bitset := toposort_index[v]) & subgraph_nodes_bitset
+                        ):
                             heappush(fuseable_variables_to_visit_next, (v_bitset, v))
 
-                if len(subgraph_variables) > 1:
-                    # We found a subgraph of at least two nodes
+                all_subgraphs_bitset |= subgraph_nodes_bitset
 
-                    # Find out which variables must become outputs
-                    subgraph_outputs = [
-                        var
-                        for var in subgraph_variables
-                        if any(
-                            isinstance(client.op, Output)
-                            or client.outputs[0] not in subgraph_variables
-                            for client, _ in fg.clients[var]
-                        )
-                    ]
-                    # We use the min toposort_index for sorting the subgraphs later
-                    min_toposort_index = min(
-                        toposort_index[var] for var in subgraph_outputs
+                # Find out which variables must become outputs
+                fg_clients = fg.clients
+                subgraph_outputs = [
+                    node.outputs[0]
+                    for node in subgraph_nodes
+                    if any(
+                        isinstance(client.op, Output) or client not in subgraph_nodes
+                        for client, _ in fg_clients[node.outputs[0]]
                     )
-                    subgraphs.append(
-                        (
-                            min_toposort_index,
-                            (subgraph_inputs, subgraph_outputs),
-                        )
+                ]
+                # We use the min toposort_index for sorting the subgraphs later
+                min_toposort_index = min(
+                    toposort_index[var.owner] for var in subgraph_outputs
+                )
+                subgraphs.append(
+                    (
+                        min_toposort_index,
+                        (subgraph_inputs, subgraph_outputs),
                     )
+                )
 
                 # Update fuseable clients, inputs can no longer be fused with graph variables
-                # And graph nodes can no longer be fused with anything
                 for inp in subgraph_inputs:
-                    if inp_fuseable_clients := fuseable_clients.get(inp):
-                        fuseable_clients[inp] = [
-                            i
-                            for i in inp_fuseable_clients
-                            if i not in subgraph_variables
-                        ]
+                    if inp_fuseable_clients := fuseable_clients.get(inp.owner):
+                        inp_fuseable_clients.difference_update(subgraph_nodes)
+                        if not inp_fuseable_clients:
+                            del fuseable_clients[inp.owner]
 
             # We need to replace in reverse topological order
             yield from (io for _, io in sorted(subgraphs, reverse=True))
