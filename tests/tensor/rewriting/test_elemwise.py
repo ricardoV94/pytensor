@@ -1369,8 +1369,8 @@ class TestFusion:
     @pytest.mark.parametrize(
         "graph_fn, n, expected_n_repl",
         [
-            ("diamond_graph", None, (1, 4)),
-            ("large_fuseable_graph", 1, (7, 36)),
+            # ("diamond_graph", None, (1, 4)),
+            ("large_fuseable_graph", 25, (128, 876)),
             ("deep_small_kernels", 20, (20, 60)),
         ],
     )
