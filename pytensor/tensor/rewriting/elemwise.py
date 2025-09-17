@@ -644,6 +644,7 @@ class FusionOptimizer(GraphRewriter):
                 )
                 subgraph_variables = [starting_var]
                 subgraph_variables_bitset = starting_bit
+                all_subgraphs_bitset |= starting_bit
 
                 # We now try to expand as much as possible towards the potentially
                 # fuseable ancestors and clients to detect the largest possible
@@ -658,9 +659,6 @@ class FusionOptimizer(GraphRewriter):
                 while fuseable_variables_to_visit_next:
                     next_var = fuseable_variables_to_visit_next.popleft()
                     next_var_bit = toposort_index[next_var]
-
-                    if next_var_bit & subgraph_variables_bitset:
-                        continue
 
                     if next_var_bit & all_subgraphs_bitset:
                         # Already part of a previous subgraph
@@ -680,9 +678,9 @@ class FusionOptimizer(GraphRewriter):
                             # If so move it from inputs of S to variables of S
                             subgraph_variables.append(next_var)
                             subgraph_variables_bitset |= next_var_bit
+                            all_subgraphs_bitset |= next_var_bit
                             subgraph_inputs.remove(next_var)
-                            new_inputs = next_var.owner.inputs
-                            subgraph_inputs.update(new_inputs)
+                            subgraph_inputs.update(next_var.owner.inputs)
                             # I don't think there's a way to recompute this incrementally faster
                             # without having some counting representation
                             subgraph_inputs_ancestors_bitset = reduce(
@@ -718,6 +716,7 @@ class FusionOptimizer(GraphRewriter):
                             # If so, add it to the subgraph variables
                             subgraph_variables.append(next_var)
                             subgraph_variables_bitset |= next_var_bit
+                            all_subgraphs_bitset |= next_var_bit
                             subgraph_inputs.update(new_inputs)
                             subgraph_inputs_ancestors_bitset |= (
                                 ancestors_of_new_required_inputs_bitset
@@ -752,7 +751,6 @@ class FusionOptimizer(GraphRewriter):
                         (min_toposort_index, (subgraph_inputs, subgraph_outputs))
                     )
 
-                all_subgraphs_bitset |= subgraph_variables_bitset
                 # Update fuseable clients, inputs can no longer be fused with graph variables
                 # And graph nodes can no longer be fused with anything
                 for inp in subgraph_inputs:
