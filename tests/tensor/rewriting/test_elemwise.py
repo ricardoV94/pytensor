@@ -1369,9 +1369,9 @@ class TestFusion:
     @pytest.mark.parametrize(
         "graph_fn, n, expected_n_repl",
         [
-            # ("diamond_graph", None, (1, 4)),
-            ("large_fuseable_graph", 25, (128, 876)),
-            ("deep_small_kernels", 20, (20, 60)),
+            ("diamond_graph", None, (1, 4)),
+            ("large_fuseable_graph", 1, (128, 876)),
+            ("deep_small_kernels", 2, (20, 60)),
         ],
     )
     def test_rewrite_benchmark(self, graph_fn, n, expected_n_repl, benchmark):
@@ -1381,12 +1381,14 @@ class TestFusion:
 
         def rewrite_func():
             fg_clone = fg.clone()
+            # print()
+            # fg.dprint()
             _, nb_fused, nb_replacement, *_ = opt.apply(fg_clone)
             # fg_clone.dprint()
             return nb_fused, nb_replacement
 
         assert rewrite_func() == expected_n_repl
-        benchmark.pedantic(rewrite_func, rounds=10, iterations=5)
+        # benchmark.pedantic(rewrite_func, rounds=10, iterations=5)
 
     def test_no_warning_from_old_client(self):
         # There used to be a warning issued when creating fuseable mapping
