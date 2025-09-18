@@ -688,6 +688,7 @@ class FusionOptimizer(GraphRewriter):
                     # subgraph via a path that cannot be included in the Composite
                     # (unfuseable)
                     fuseable_nodes_to_visit = deque([starting_node])
+                    # print(f"\nStarting new subgraph exploration from {starting_node}")
                     while fuseable_nodes_to_visit:
                         next_node = fuseable_nodes_to_visit.popleft()
                         visited_nodes.add(next_node)
@@ -700,10 +701,7 @@ class FusionOptimizer(GraphRewriter):
                             next_out
                         ) or unfuseable_clients_clone.get(next_out)
 
-                        # We have backtracked to this node, and it may no longer be a viable output,
-                        # so we remove it and check again as if we had never seen this node
-                        if must_become_output:
-                            subgraph_outputs.pop(next_out, None)
+                        # print(f"\t > Visiting {"output" if must_become_output else "intermediate"} {next_node}")
 
                         # We need to check that any inputs required by this node
                         # do not depend on other outputs of the current subgraph,
@@ -712,8 +710,16 @@ class FusionOptimizer(GraphRewriter):
                             ancestors_bitset[next_node]
                             & unfuseable_clients_subgraph_bitset
                         )
+                        # if must_backtrack:
+                        #     print(
+                        #         "\t\t- Backtracking required, node inputs depend on unfuseable clients of subgraph"
+                        #     )
 
-                        if not must_backtrack:
+                        if must_become_output and not must_backtrack:
+                            # We need to check that any inputs of the current subgraph
+                            # do not depend on other clients of this node, via an unfuseable path.
+                            # If node has unfuseable clients, it must also become an output
+                            # If we already figured out we need to backtrack, no need for this check
                             implied_unfuseable_clients_bitset = reduce(
                                 or_,
                                 (
@@ -724,13 +730,14 @@ class FusionOptimizer(GraphRewriter):
                                 0,
                             )
 
-                            # We need to check that any inputs of the current subgraph
-                            # do not depend on other clients of this node,
-                            # via an unfuseable path.
                             must_backtrack = (
                                 subgraph_inputs_ancestors_bitset
                                 & implied_unfuseable_clients_bitset
                             )
+                            # if must_backtrack:
+                            #     print(
+                            #         "\t\t- Backtracking required, subgraph inputs depend on unfuseable clients of node"
+                            #     )
 
                         if must_backtrack:
                             for inp in next_node.inputs:
@@ -762,6 +769,10 @@ class FusionOptimizer(GraphRewriter):
                                     # We will revisit any of its clients currently
                                     # in the subgraph to make sure this is safe.
                                     fuseable_nodes_to_visit.appendleft(client)
+
+                            if must_become_output:
+                                # We backtracked here
+                                subgraph_outputs.pop(next_out, None)
 
                             # Revisit node at a later time
                             visited_nodes.remove(next_node)
@@ -815,8 +826,14 @@ class FusionOptimizer(GraphRewriter):
                         unfuseable_clients[starting_out].update(
                             fuseable_clients.pop(starting_out, ())
                         )
+                        # print("Failed - No fusion possible")
                         continue
 
+                    # _fg = FunctionGraph(list(subgraph_inputs), list(subgraph_outputs))
+                    # print(
+                    #     f"Found subgraph with {len(subgraph_inputs)} inputs, {len(subgraph_outputs)} outputs, and {len(_fg.apply_nodes)} nodes"
+                    # )
+                    # _fg.dprint()
                     return subgraph_inputs, subgraph_outputs
                 raise ValueError
 
