@@ -652,34 +652,42 @@ class FusionOptimizer(GraphRewriter):
                 # We always want to visit ancestors before clients
                 # For ancestors we want to visit the larger toposort index firsts (have more dependencies)
                 # whereas for clients we want to visit the smaller toposort index first (have less dependencies)
-                fuseable_variables_to_visit_next = [
-                    (toposort_index[v], v) for v in fuseable_ancestors[starting_node]
+                fuseables_nodes_queue = [
+                    (-toposort_index[v], v) for v in fuseable_ancestors[starting_node]
                 ]
-                heapify(fuseable_variables_to_visit_next)
-                while fuseable_variables_to_visit_next:
-                    next_node_bit, next_node = heappop(fuseable_variables_to_visit_next)
+                heapify(fuseables_nodes_queue)
+                # print(f"\nStarting new subgraph exploration from {starting_node}")
+                while fuseables_nodes_queue:
+                    next_node_bit, next_node = heappop(fuseables_nodes_queue)
+                    is_ancestor = next_node_bit < 0
+                    if is_ancestor:
+                        next_node_bit = -next_node_bit
+
+                    # print(f"\t > Visiting {'ancestor' if is_ancestor else 'client'} {next_node}")
 
                     if next_node_bit & subgraph_nodes_bitset:
                         # Already part of the subgraph
+                        # print("\t   - already in subgraph")
                         continue
 
-                    next_var = next_node.outputs[0]
-
-                    if next_var in subgraph_inputs:
+                    if is_ancestor:
                         # It's an input of S
                         # assert not (ancestors_bitset[next_var] & subgraph_variables_bitset)
+                        # assert (next_var: node.outputs[0]) in subgraph_inputs)
 
                         # Could next_out become part of S?
                         # For that, other inputs of S must not depend on it
                         # Since a variable does not depend on itself,
                         # the presence in the inputs_ancestors must mean another input depends on it
                         if next_node_bit & subgraph_inputs_ancestors_bitset:
+                            # print("\t   failed - other inputs depend on it")
                             continue
                         else:
                             # If so move it from inputs of S to variables of S
+                            # print("\t   succeeded - adding to subgraph inputs")
                             subgraph_nodes.append(next_node)
                             subgraph_nodes_bitset |= next_node_bit
-                            subgraph_inputs.remove(next_var)
+                            subgraph_inputs.remove(next_node.outputs[0])
                             subgraph_inputs.update(next_node.inputs)
                             # I don't think there's a way to recompute this incrementally faster
                             # without having some counting representation
@@ -709,9 +717,11 @@ class FusionOptimizer(GraphRewriter):
                             ancestors_of_new_required_inputs_bitset
                             & subgraph_nodes_bitset
                         ):
+                            # print("\t  failed - some new inputs depend on subgraph")
                             continue
                         else:
                             # If so, add it to the subgraph variables
+                            # print("\t  succeeded - adding to subgraph nodes")
                             subgraph_nodes.append(next_node)
                             subgraph_nodes_bitset |= next_node_bit
                             subgraph_inputs.update(new_inputs)
@@ -724,12 +734,12 @@ class FusionOptimizer(GraphRewriter):
                         if not (
                             (v_bitset := toposort_index[v]) & subgraph_nodes_bitset
                         ):
-                            heappush(fuseable_variables_to_visit_next, (v_bitset, v))
+                            heappush(fuseables_nodes_queue, (-v_bitset, v))
                     for v in fuseable_clients.get(next_node, ()):
                         if not (
                             (v_bitset := toposort_index[v]) & subgraph_nodes_bitset
                         ):
-                            heappush(fuseable_variables_to_visit_next, (v_bitset, v))
+                            heappush(fuseables_nodes_queue, (v_bitset, v))
 
                 all_subgraphs_bitset |= subgraph_nodes_bitset
 
@@ -746,7 +756,11 @@ class FusionOptimizer(GraphRewriter):
                 # We use the min toposort_index for sorting the subgraphs later
                 min_toposort_index = min(
                     toposort_index[var.owner] for var in subgraph_outputs
-                )
+                ).bit_length()
+
+                # print(f"Found subgraph with {len(subgraph_inputs)} inputs, {len(subgraph_outputs)} outputs, and {len(subgraph_nodes)} nodes ({min_toposort_index=})")
+                # FunctionGraph(list(subgraph_inputs), subgraph_outputs).dprint()
+
                 subgraphs.append(
                     (
                         min_toposort_index,
