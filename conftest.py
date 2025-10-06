@@ -3,6 +3,9 @@ import os
 import pytest
 
 
+pytest_plugins = ["tests.shared_fixtures"]
+
+
 def pytest_sessionstart(session):
     os.environ["PYTENSOR_FLAGS"] = ",".join(
         [
