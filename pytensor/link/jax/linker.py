@@ -18,18 +18,23 @@ class JAXLinker(JITLinker):
     def fgraph_convert(self, fgraph, input_storage, storage_map, **kwargs):
         from pytensor.link.jax.dispatch import jax_funcify
         from pytensor.link.jax.dispatch.shape import JAXShapeTuple
+        from pytensor.tensor.basic import MakeVector
         from pytensor.tensor.random.type import RandomType
 
-        shared_rng_inputs = [
-            inp
-            for inp in fgraph.inputs
-            if (isinstance(inp, SharedVariable) and isinstance(inp.type, RandomType))
-        ]
+        clients = fgraph.clients
 
         # Replace any shared RNG inputs so that their values can be updated in place
         # without affecting the original RNG container. This is necessary because
         # JAX does not accept Generators as inputs, and they will have to
         # be tipyfied
+        shared_rng_inputs = [
+            inp
+            for inp in fgraph.inputs
+            if (isinstance(inp, SharedVariable) and isinstance(inp.type, RandomType))
+            # If it isn't used there's no need to replace it (and the logic below would fail)
+            and clients[inp]
+        ]
+
         if shared_rng_inputs:
             warnings.warn(
                 f"The RandomType SharedVariables {shared_rng_inputs} will not be used "
@@ -71,22 +76,22 @@ class JAXLinker(JITLinker):
                 fgraph.inputs.remove(new_inp)
                 fgraph.inputs.insert(old_inp_fgrap_index, new_inp)
 
-        fgraph_inputs = fgraph.inputs
-        clients = fgraph.clients
-        # Detect scalar shape inputs that are used only in JAXShapeTuple nodes
-        scalar_shape_inputs = [
-            inp
-            for node in fgraph.apply_nodes
-            if isinstance(node.op, JAXShapeTuple)
-            for inp in node.inputs
-            if inp in fgraph_inputs
-            and all(
-                isinstance(cl_node.op, JAXShapeTuple) for cl_node, _ in clients[inp]
-            )
-        ]
-        self.scalar_shape_inputs = tuple(
-            fgraph_inputs.index(inp) for inp in scalar_shape_inputs
-        )
+        # Detect scalar shape inputs that can be converted to Python integers and marked as static
+        # So JAX can actually work with them
+        scalar_shape_inputs = []
+        for inp_index, inp in enumerate(fgraph.inputs):
+            is_shape_input = False
+            for cl_node, _ in clients[inp]:
+                if isinstance(cl_node.op, JAXShapeTuple):
+                    is_shape_input = True
+                # Other Ops that can work with integer inputs
+                # but do not require static inputs for JAX to work
+                elif not isinstance(cl_node.op, MakeVector):
+                    is_shape_input = False
+                    break
+            if is_shape_input:
+                scalar_shape_inputs.append(inp_index)
+        self.scalar_shape_inputs = tuple(scalar_shape_inputs)
 
         return jax_funcify(
             fgraph, input_storage=input_storage, storage_map=storage_map, **kwargs

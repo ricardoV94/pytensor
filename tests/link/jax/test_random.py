@@ -963,3 +963,12 @@ class TestRandomShapeInputs:
         new_x = clone_replace(x, {size: pt.constant([2, 5])}, rebuild_strict=False)
         assert new_x.type.shape == (2, 5)
         assert compile_random_function([], new_x)().shape == (2, 5)
+
+    def test_random_mean(self):
+        dim = pt.scalar("dim", dtype=int)
+        rvs = pt.random.normal(0, 1, size=dim)
+        centered_rvs = rvs - rvs.mean()
+        # Mean introduces a MakeVector Op
+        # Full blown JAX mode to lift the shape operation onto the dim
+        jax_fn = compile_random_function([dim], centered_rvs, mode="JAX")
+        np.testing.assert_allclose(jax_fn(np.array(10)).mean(), 0, atol=1e-15)
