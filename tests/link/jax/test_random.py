@@ -8,6 +8,7 @@ import pytensor.tensor.random.basic as ptr
 from pytensor import clone_replace
 from pytensor.compile.function import function
 from pytensor.compile.sharedvalue import shared
+from pytensor.link import IncompatibleSharedVariableWarning
 from pytensor.tensor.random.basic import RandomVariable
 from pytensor.tensor.random.type import RandomType
 from pytensor.tensor.random.utils import RandomStream
@@ -28,7 +29,8 @@ from pytensor.link.jax.dispatch.random import numpyro_available  # noqa: E402
 
 def compile_random_function(*args, mode=jax_mode, **kwargs):
     with pytest.warns(
-        UserWarning, match=r"The RandomType SharedVariables \[.+\] will not be used"
+        IncompatibleSharedVariableWarning,
+        match=r"The RandomType SharedVariables \[.+\] will not be used",
     ):
         return function(*args, mode=mode, **kwargs)
 

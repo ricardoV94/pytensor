@@ -3,6 +3,7 @@ import warnings
 from numpy.random import Generator
 
 from pytensor.compile.sharedvalue import SharedVariable, shared
+from pytensor.link import IncompatibleSharedVariableWarning
 from pytensor.link.basic import JITLinker
 
 
@@ -39,7 +40,7 @@ class JAXLinker(JITLinker):
             warnings.warn(
                 f"The RandomType SharedVariables {shared_rng_inputs} will not be used "
                 f"in the compiled JAX graph. Instead a copy will be used.",
-                UserWarning,
+                IncompatibleSharedVariableWarning,
             )
             new_shared_rng_inputs = [
                 shared(inp.get_value(borrow=False)) for inp in shared_rng_inputs
