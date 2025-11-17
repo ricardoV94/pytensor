@@ -12,7 +12,7 @@ from pytensor import config
 from pytensor.gradient import grad_not_implemented
 from pytensor.graph import Apply, Op
 from pytensor.link.c.op import COp
-from pytensor.sparse import SparseTensorType
+from pytensor.sparse.type import SparseTensorType
 from pytensor.tensor import TensorType, Variable, specify_broadcastable, tensor
 from pytensor.tensor.type import complex_dtypes
 

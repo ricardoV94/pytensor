@@ -22,7 +22,7 @@ from pytensor.sparse.math import (
     gt,
     le,
     lt,
-    mul,
+    multiply,
     sp_sum,
     structured_conjugate,
     structured_dot,
@@ -94,10 +94,10 @@ class _sparse_py_operators:
         return sub(left, right)
 
     def __mul__(left, right):
-        return mul(left, right)
+        return multiply(left, right)
 
     def __rmul__(left, right):
-        return mul(left, right)
+        return multiply(left, right)
 
     # comparison operators
 
