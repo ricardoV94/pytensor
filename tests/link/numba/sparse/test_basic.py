@@ -9,6 +9,7 @@ import pytensor.sparse as ps
 import pytensor.tensor as pt
 from pytensor.graph import Apply, Op
 from pytensor.tensor.type import DenseTensorType
+from pytensor.sparse.variable import SparseConstant
 
 
 numba = pytest.importorskip("numba")
@@ -177,6 +178,27 @@ def test_overload_csr_matrix_constructor():
     assert out_pt.indptr is inp.indptr
     assert out_pt.indptr.flags.owndata
     assert (out_pt.indptr == inp.indptr).all()
+
+
+@pytest.mark.xfail(reason="We cannot lower constant SparseVariables yet")
+@pytest.mark.parametrize("cache", [True, False])
+@pytest.mark.parametrize("format", ["csr", "csc"])
+def test_constant(format, cache):
+    x = sp.sparse.random(3, 3, density=0.5, format=format, random_state=166)
+    x = ps.as_sparse(x)
+    assert isinstance(x, SparseConstant)
+    assert x.type.format == format
+    y = pt.vector("y", shape=(3,))
+    out = x * y
+
+    y_test = np.array([np.pi, np.e, np.euler_gamma])
+    with config.change_flags(numba__cache=cache):
+        compare_numba_and_py_sparse(
+            [y],
+            [out],
+            [y_test],
+            eval_obj_mode=False,
+        )
 
 
 @pytest.mark.parametrize("format", ["csr", "csc"])
