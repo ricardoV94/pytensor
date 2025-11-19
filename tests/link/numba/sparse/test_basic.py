@@ -7,6 +7,8 @@ import scipy as sp
 
 import pytensor.sparse as ps
 import pytensor.tensor as pt
+from pytensor.graph import Apply, Op
+from pytensor.tensor.type import DenseTensorType
 
 
 numba = pytest.importorskip("numba")
@@ -15,7 +17,7 @@ numba = pytest.importorskip("numba")
 # Make sure the Numba customizations are loaded
 import pytensor.link.numba.dispatch.sparse  # noqa: F401
 from pytensor import config
-from pytensor.sparse import Dot, SparseTensorType
+from pytensor.sparse import SparseTensorType
 from tests.link.numba.test_basic import compare_numba_and_py
 
 
@@ -108,20 +110,36 @@ def test_sparse_copy():
     assert y is not x and np.all(x.data == y.data) and np.all(x.indices == y.indices)
 
 
-def test_sparse_objmode():
-    x = SparseTensorType("csc", dtype=config.floatX)()
-    y = SparseTensorType("csc", dtype=config.floatX)()
+@pytest.mark.parametrize("format", ["csc", "csr"])
+@pytest.mark.parametrize("dense_out", [True, False])
+def test_sparse_objmode(format, dense_out):
+    class SparseTestOp(Op):
+        def make_node(self, x):
+            out = x.type.clone(shape=(1, x.type.shape[-1]))()
+            if dense_out:
+                out = out.todense().type()
+            return Apply(self, [x], [out])
 
-    out = Dot()(x, y)
+        def perform(self, node, inputs, output_storage):
+            [x] = inputs
+            [out] = output_storage
+            out[0] = x[0]
+            if dense_out:
+                out[0] = out[0].todense()
 
-    x_val = sp.sparse.random(2, 2, density=0.25, dtype=config.floatX)
-    y_val = sp.sparse.random(2, 2, density=0.25, dtype=config.floatX)
+    x = SparseTensorType(format, dtype=config.floatX, shape=(5, 5))()
+
+    out = SparseTestOp()(x)
+    assert out.type.shape == (1, 5)
+    assert isinstance(out.type, DenseTensorType if dense_out else SparseTensorType)
+
+    x_val = sp.sparse.random(5, 5, density=0.25, dtype=config.floatX, format=format)
 
     with pytest.warns(
         UserWarning,
-        match="Numba will use object mode to run SparseDot's perform method",
+        match="Numba will use object mode to run SparseTestOp's perform method",
     ):
-        compare_numba_and_py([x, y], out, [x_val, y_val])
+        compare_numba_and_py_sparse([x], out, [x_val])
 
 
 def test_overload_csr_matrix_constructor():
