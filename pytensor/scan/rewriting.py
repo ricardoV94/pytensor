@@ -72,9 +72,9 @@ from pytensor.tensor.shape import shape
 from pytensor.tensor.subtensor import (
     IncSubtensor,
     Subtensor,
+    basic_subtensor,
     get_canonical_form_slice,
     get_idx_list,
-    get_slice_elements,
     set_subtensor,
 )
 from pytensor.tensor.variable import TensorConstant, TensorVariable
@@ -1711,16 +1711,9 @@ def scan_save_mem_rewrite(fgraph, node, backend_supports_output_pre_allocation: 
                         )
                     else:
                         fslice = sanitize(cnf_slice[0])
-                    nw_slice = (fslice, *old_slices[1:])
 
                     nw_pos = inv_compress_map[idx]
-
-                    subtens = Subtensor(nw_slice)
-                    # slice inputs
-                    sl_ins = get_slice_elements(
-                        nw_slice, lambda entry: isinstance(entry, Variable)
-                    )
-                    new_o = cast(TensorVariable, subtens(new_outs[nw_pos], *sl_ins))
+                    new_o = basic_subtensor(new_outs[nw_pos], fslice, *old_slices[1:])
                     if new_o.ndim > 0:
                         new_o = new_o[:: cnf_slice[1]]
                     replaced_outs.append(idx)
@@ -1771,11 +1764,7 @@ def scan_save_mem_rewrite(fgraph, node, backend_supports_output_pre_allocation: 
                             )
 
                         nw_slice = (sanitize(position), *old_slices[1:])
-                    subtens = Subtensor(nw_slice)
-                    sl_ins = get_slice_elements(
-                        nw_slice, lambda entry: isinstance(entry, Variable)
-                    )
-                    new_o = cast(TensorVariable, subtens(new_outs[nw_pos], *sl_ins))
+                    new_o = basic_subtensor(new_outs[nw_pos], *nw_slice)
                     if new_o.ndim > 0:
                         new_o = new_o[:: cnf_slice[1]]
                     old_new += [(old, new_o)]
