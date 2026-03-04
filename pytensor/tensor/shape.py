@@ -385,6 +385,22 @@ def register_shape_i_c_code(typ, code, check_input, version=()):
     Shape_i.c_code_and_version[typ] = (code, check_input, version)
 
 
+@_vectorize_node.register(Shape_i)
+def vectorize_shape_i(op: Shape_i, node, batched_x):
+    # TODO: Add test, including with xtensor inputs
+    from pytensor.tensor.extra_ops import broadcast_to
+
+    [old_x] = node.inputs
+    core_ndims = old_x.type.ndim
+    batch_ndims = batched_x.type.ndim - core_ndims
+    batched_x_shape_i = shape_i(batched_x, op.i + batch_ndims)
+    if not batch_ndims:
+        return [batched_x_shape_i]
+    else:
+        batch_shape = batched_x.shape[:batch_ndims]
+        return [broadcast_to(batched_x_shape_i, batch_shape)]
+
+
 class SpecifyShape(COp):
     """
     L{Op} that puts into the graph the user-provided shape.
