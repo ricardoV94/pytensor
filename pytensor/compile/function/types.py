@@ -333,18 +333,19 @@ class Function:
     """
 
     __slots__ = (
-        # Created inside __init__
         "_clear_input_storage_data",
         "_clear_output_storage_data",
         "_finder",
-        "_has_updates",
+        "_has_output_updates",
         "_input_storage_data",
         "_inv_finder",
         "_n_returned_outputs",
         "_n_unnamed_inputs",
         "_named_inputs",
         "_nodes_with_inner_function",
+        "_output_storage_data",
         "_potential_aliased_input_groups",
+        "_single_input",
         "_update_input_storage",
         "indices",
         "input_storage",
@@ -505,8 +506,8 @@ class Function:
             if inp.update is not None
         ]
         # Updates are the last inner outputs that are not returned by Function.__call__
-        self._has_updates = len(update_storage) > 0
         self._n_returned_outputs = len(self.output_storage) - len(update_storage)
+        self._has_output_updates = len(update_storage) > 0
 
         # Function.__call__ is responsible for updating the inputs, unless the vm promises to do it itself
         self._update_input_storage: tuple[int, Container] = ()
@@ -521,6 +522,10 @@ class Function:
 
         self._input_storage_data = tuple(
             container.storage for container in input_storage
+        )
+        self._single_input = len(input_storage) == 1
+        self._output_storage_data = tuple(
+            container.storage for container in self.output_storage
         )
 
         # In every function call we place inputs in the input_storage, and the vm places outputs in the output_storage
@@ -778,13 +783,35 @@ class Function:
 
         f_cpy.trust_input = self.trust_input
         f_cpy.unpack_single = self.unpack_single
+
         return f_cpy
 
     def _validate_inputs(self, args, kwargs):
         input_storage = self.input_storage
+        n_args = len(args)
+        n_kwargs = len(kwargs)
 
-        if len(args) + len(kwargs) > len(input_storage):
+        if n_args + n_kwargs > len(input_storage):
             raise TypeError("Too many parameter passed to pytensor function")
+
+        # Fast path: single positional arg, no kwargs, no aliasing concerns
+        if (
+            n_args == 1
+            and n_kwargs == 0
+            and self._single_input
+            and not self._potential_aliased_input_groups
+        ):
+            arg_container = input_storage[0]
+            try:
+                arg_container.storage[0] = arg_container.type.filter(
+                    args[0],
+                    strict=arg_container.strict,
+                    allow_downcast=arg_container.allow_downcast,
+                )
+            except Exception as e:
+                self._format_input_error(e, arg_container, args[0], 0)
+                raise
+            return
 
         for arg_container in input_storage:
             arg_container.provided = 0
@@ -800,30 +827,7 @@ class Function:
 
             except Exception as e:
                 i = input_storage.index(arg_container)
-                function_name = "pytensor function"
-                argument_name = "argument"
-                if self.name:
-                    function_name += ' with name "' + self.name + '"'
-                if hasattr(arg, "name") and arg.name:
-                    argument_name += ' with name "' + arg.name + '"'
-                where = get_variable_trace_string(self.maker.inputs[i].variable)
-                if len(e.args) == 1:
-                    e.args = (
-                        "Bad input "
-                        + argument_name
-                        + " to "
-                        + function_name
-                        + f" at index {int(i)} (0-based). {where}"
-                        + e.args[0],
-                    )
-                else:
-                    e.args = (
-                        "Bad input "
-                        + argument_name
-                        + " to "
-                        + function_name
-                        + f" at index {int(i)} (0-based). {where}"
-                    ) + e.args
+                self._format_input_error(e, arg_container, arg, i)
                 raise
             arg_container.provided += 1
 
@@ -887,6 +891,61 @@ class Function:
                     f"Tried to provide value for implicit input: {getattr(self._inv_finder[arg_container], 'variable', self._inv_finder[arg_container])}"
                 )
 
+    def _format_input_error(self, e, arg_container, arg, i):
+        """Format error message for bad input."""
+        function_name = "pytensor function"
+        argument_name = "argument"
+        if self.name:
+            function_name += ' with name "' + self.name + '"'
+        if hasattr(arg, "name") and arg.name:
+            argument_name += ' with name "' + arg.name + '"'
+        where = get_variable_trace_string(self.maker.inputs[i].variable)
+        if len(e.args) == 1:
+            e.args = (
+                "Bad input "
+                + argument_name
+                + " to "
+                + function_name
+                + f" at index {int(i)} (0-based). {where}"
+                + e.args[0],
+            )
+        else:
+            e.args = (
+                "Bad input "
+                + argument_name
+                + " to "
+                + function_name
+                + f" at index {int(i)} (0-based). {where}"
+            ) + e.args
+
+    def _update_profile(self, vm, profile, t0):
+        """Update profiling counters after a call."""
+        dt_call = time.perf_counter() - t0
+        pytensor.compile.profiling.total_fct_exec_time += dt_call
+        self.maker.mode.call_time += dt_call
+        profile.fct_callcount += 1
+        profile.fct_call_time += dt_call
+        if hasattr(vm, "update_profile"):
+            vm.update_profile(profile)
+        if profile.ignore_first_call:
+            profile.reset()
+            profile.ignore_first_call = False
+
+    def _handle_call_exception(self, vm):
+        """Handle exceptions from vm() calls."""
+        if hasattr(vm, "position_of_error"):
+            thunk = None
+            if hasattr(vm, "thunks"):
+                thunk = vm.thunks[vm.position_of_error]
+            raise_with_op(
+                self.maker.fgraph,
+                node=vm.nodes[vm.position_of_error],
+                thunk=thunk,
+                storage_map=getattr(vm, "storage_map", None),
+            )
+        else:
+            raise
+
     def __call__(self, *args, **kwargs):
         """
         Evaluates value of a function on given arguments.
@@ -915,80 +974,58 @@ class Function:
             List of outputs on indices/keys from ``output_subset`` or all of them,
             if ``output_subset`` is not passed.
         """
-        if self.profile:
+        profile = self.profile
+        if profile:
             t0 = time.perf_counter()
 
-        # Reinitialize each container's 'provided' counter
         if self.trust_input:
-            for storage_data, arg in zip(self._input_storage_data, args):
-                storage_data[0] = arg
-            if kwargs:  # for speed, skip the items for empty kwargs
+            if self._single_input:
+                self._input_storage_data[0][0] = args[0]
+            else:
+                for storage_data, arg in zip(self._input_storage_data, args):
+                    storage_data[0] = arg
+            if kwargs:
                 for k, arg in kwargs.items():
                     self._finder[k].storage[0] = arg
         else:
             self._validate_inputs(args, kwargs)
 
-        # Do the actual work
+        vm = self.vm
+
         try:
-            if self.profile:
+            if profile:
                 t0_fn = time.perf_counter()
-                outputs = self.vm()
+                outputs = vm()
                 dt_fn = time.perf_counter() - t0_fn
                 self.maker.mode.fn_time += dt_fn
-                self.profile.vm_call_time += dt_fn
+                profile.vm_call_time += dt_fn
             else:
-                outputs = self.vm()
+                outputs = vm()
         except Exception:
-            if hasattr(self.vm, "position_of_error"):
-                # this is a new vm-provided function or c linker
-                # they need this because the exception manipulation
-                # done by raise_with_op is not implemented in C.
-                thunk = None
-                if hasattr(self.vm, "thunks"):
-                    thunk = self.vm.thunks[self.vm.position_of_error]
-                raise_with_op(
-                    self.maker.fgraph,
-                    node=self.vm.nodes[self.vm.position_of_error],
-                    thunk=thunk,
-                    storage_map=getattr(self.vm, "storage_map", None),
-                )
-            else:
-                # old-style linkers raise their own exceptions
-                raise
+            self._handle_call_exception(vm)
 
         if outputs is None:
-            # Not all VMs can return outputs directly (mainly CLinker?)
-            outputs = [x.storage[0] for x in self.output_storage]
+            outputs = [sd[0] for sd in self._output_storage_data]
 
-        # Set updates and filter them out from the returned outputs
-        if self._has_updates:
+        if self._has_output_updates:
             for i, input_storage in self._update_input_storage:
                 input_storage.storage[0] = outputs[i]
             outputs = outputs[: self._n_returned_outputs]
 
-        # Remove input and output values from storage data
-        if self.vm.allow_gc:
+        if vm.allow_gc:
             for storage_data in self._clear_input_storage_data:
                 storage_data[0] = None
             for storage_data in self._clear_output_storage_data:
                 storage_data[0] = None
 
-        if self.profile:
-            profile = self.profile
-            dt_call = time.perf_counter() - t0
-            pytensor.compile.profiling.total_fct_exec_time += dt_call
-            self.maker.mode.call_time += dt_call
-            profile.fct_callcount += 1
-            profile.fct_call_time += dt_call
-            if hasattr(self.vm, "update_profile"):
-                self.vm.update_profile(profile)
-            if profile.ignore_first_call:
-                profile.reset()
-                profile.ignore_first_call = False
+        if profile:
+            self._update_profile(vm, profile, t0)
 
-        return (
-            outputs[0] if self.unpack_single else None if self.return_none else outputs
-        )
+        if self.unpack_single:
+            return outputs[0]
+        if self.return_none:
+            return None
+        return outputs
 
     def free(self):
         """
@@ -1590,6 +1627,7 @@ class FunctionMaker:
         )
 
         fn.profile = self.profile
+
         return fn
 
 

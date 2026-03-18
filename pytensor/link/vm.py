@@ -396,7 +396,7 @@ class Loop(UpdatingVM):
                     i += 1
             except Exception:
                 raise_with_op(self.fgraph, node, thunk)
-        else:
+        elif self.post_thunk_clear:
             for cont in self.pre_call_clear:
                 cont[0] = None
             try:
@@ -406,6 +406,15 @@ class Loop(UpdatingVM):
                     thunk()
                     for old_s in old_storage:
                         old_s[0] = None
+            except Exception:
+                raise_with_op(self.fgraph, node, thunk)
+        else:
+            # No timing, no gc - fastest path
+            for cont in self.pre_call_clear:
+                cont[0] = None
+            try:
+                for thunk, node in zip(self.thunks, self.nodes):
+                    thunk()
             except Exception:
                 raise_with_op(self.fgraph, node, thunk)
 

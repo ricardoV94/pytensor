@@ -52,6 +52,18 @@ class Container:
 
     """
 
+    __slots__ = (
+        "allow_downcast",
+        "implicit",
+        "name",
+        "provided",
+        "readonly",
+        "required",
+        "storage",
+        "strict",
+        "type",
+    )
+
     def __init__(
         self,
         r: Variable | Type,
@@ -111,6 +123,15 @@ class Container:
 
     data = property(__get__, __set__)
     value = property(__get__, __set__)
+
+    def __getstate__(self):
+        return {
+            slot: getattr(self, slot) for slot in self.__slots__ if hasattr(self, slot)
+        }
+
+    def __setstate__(self, state):
+        for slot, value in state.items():
+            setattr(self, slot, value)
 
     def __str__(self):
         return "<" + str(self.storage[0]) + ">"
@@ -672,22 +693,42 @@ class JITLinker(PerformLinker):
         fgraph_jit = self.jit_compile(converted_fgraph)
 
         if thunk_outputs:
+            n_inputs = len(thunk_inputs)
+            n_outputs = len(thunk_outputs)
 
-            def thunk(
-                fgraph_jit=fgraph_jit,
-                thunk_inputs=thunk_inputs,
-                thunk_outputs=thunk_outputs,
-            ):
-                try:
-                    outputs = fgraph_jit(*(x[0] for x in thunk_inputs))
-                except Exception:
-                    # TODO: Should we add a fake node that combines all outputs,
-                    #  since the error may come from any of them?
-                    raise_with_op(self.fgraph, output_nodes[0], thunk)
+            if n_inputs == 1 and n_outputs == 1:
+                # Specialized fast path for single-input, single-output
+                thunk_input0 = thunk_inputs[0]
+                thunk_output0 = thunk_outputs[0]
 
-                # strict=None because we are in a hot loop
-                for o_storage, o_val in zip(thunk_outputs, outputs):
-                    o_storage[0] = o_val
+                def thunk(
+                    fgraph_jit=fgraph_jit,
+                    thunk_input0=thunk_input0,
+                    thunk_output0=thunk_output0,
+                ):
+                    try:
+                        result = fgraph_jit(thunk_input0[0])
+                    except Exception:
+                        raise_with_op(self.fgraph, output_nodes[0], thunk)
+                    thunk_output0[0] = result[0]
+
+            else:
+
+                def thunk(
+                    fgraph_jit=fgraph_jit,
+                    thunk_inputs=thunk_inputs,
+                    thunk_outputs=thunk_outputs,
+                ):
+                    try:
+                        outputs = fgraph_jit(*(x[0] for x in thunk_inputs))
+                    except Exception:
+                        # TODO: Should we add a fake node that combines all outputs,
+                        #  since the error may come from any of them?
+                        raise_with_op(self.fgraph, output_nodes[0], thunk)
+
+                    # strict=None because we are in a hot loop
+                    for o_storage, o_val in zip(thunk_outputs, outputs):
+                        o_storage[0] = o_val
 
         else:
             # Edge case - functions without outputs
