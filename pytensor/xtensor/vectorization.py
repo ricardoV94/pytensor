@@ -4,10 +4,7 @@ from itertools import chain
 from typing import Literal
 from typing import cast as typing_cast
 
-import numpy as np
-
 from pytensor import scalar as ps
-from pytensor import shared
 from pytensor.graph import Apply, Op
 from pytensor.graph.basic import Variable
 from pytensor.graph.replace import _vectorize_node
@@ -226,11 +223,23 @@ class XRV(XOp, RNGConsumerOp):
 
     def make_node(self, rng, *extra_dim_lengths_and_params):
         if rng is None:
-            rng = shared(np.random.default_rng())
+            import warnings
+
+            from pytensor.tensor.random.variable import shared_rng
+
+            warnings.warn(
+                "Calling an XRV without an explicit rng is deprecated. "
+                "Use xt.random.rng() or xt.random.shared_rng().",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            rng = shared_rng()
         elif not isinstance(rng.type, RandomType):
             raise TypeError(
                 "The type of rng should be an instance of RandomGeneratorType "
             )
+
+        rng.tag.used = True
 
         extra_dim_lengths = [
             as_tensor(dim_length, allow_xtensor_conversion=True)
@@ -303,7 +312,11 @@ class XRV(XOp, RNGConsumerOp):
             dummy_core_inputs.append(
                 tensor(dtype=param.type.dtype, shape=core_static_shape)
             )
-        core_node = self.core_op.make_node(rng, None, *dummy_core_inputs)
+        # Use a dummy tensor rng for type inference (core_op expects RandomGeneratorType)
+        from pytensor.tensor.random.type import random_generator_type
+
+        dummy_rng = random_generator_type()
+        core_node = self.core_op.make_node(dummy_rng, None, *dummy_core_inputs)
 
         if not len(core_node.outputs) == 2:
             raise NotImplementedError(

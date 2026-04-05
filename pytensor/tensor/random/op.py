@@ -314,7 +314,18 @@ class RandomVariable(RNGConsumerOp):
 
         return [None, list(shape)]
 
-    def __call__(self, *args, size=None, name=None, rng=None, dtype=None, **kwargs):
+    def __call__(
+        self,
+        *args,
+        size=None,
+        name=None,
+        rng=None,
+        dtype=None,
+        return_next_rng: bool = False,
+        **kwargs,
+    ):
+        import warnings
+
         if dtype is None:
             dtype = self.dtype
         if dtype == "floatX":
@@ -332,15 +343,42 @@ class RandomVariable(RNGConsumerOp):
             props["dtype"] = dtype
             new_op = type(self)(**props)
             return new_op.__call__(
-                *args, size=size, name=name, rng=rng, dtype=dtype, **kwargs
+                *args,
+                size=size,
+                name=name,
+                rng=rng,
+                dtype=dtype,
+                return_next_rng=return_next_rng,
+                **kwargs,
             )
 
-        res = super().__call__(rng, size, *args, **kwargs)
+        if rng is None:
+            from pytensor.tensor.random.variable import shared_rng
 
+            warnings.warn(
+                "Calling a RandomVariable without an explicit rng is deprecated. "
+                "Use pt.random.rng() or pt.random.shared_rng().",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            rng = shared_rng()
+
+        if not return_next_rng:
+            warnings.warn(
+                "RandomVariable Ops will stop hiding the rng output in a future version. "
+                "Set return_next_rng=True to suppress this warning.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        node = self.make_node(rng, size, *args)
+        outputs = node.outputs
         if name is not None:
-            res.name = name
-
-        return res
+            outputs[1].name = name
+        if return_next_rng:
+            return outputs
+        else:
+            return outputs[1]
 
     def make_node(self, rng, size, *dist_params):
         """Create a random variable node.
@@ -373,11 +411,16 @@ class RandomVariable(RNGConsumerOp):
         )
 
         if rng is None:
-            rng = pytensor.shared(np.random.default_rng())
+            raise TypeError(
+                "rng must not be None. Use pt.random.rng() for a symbolic input "
+                "or pt.random.shared_rng() for a shared RNG."
+            )
         elif not isinstance(rng.type, RandomType):
             raise TypeError(
                 "The type of rng should be an instance of RandomGeneratorType "
             )
+
+        rng.tag.used = True
 
         inferred_shape = self._infer_shape(size, dist_params)
         _, static_shape = infer_static_shape(inferred_shape)
