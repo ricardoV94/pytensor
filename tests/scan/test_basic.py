@@ -199,14 +199,19 @@ def scan_project_sum(*args, **kwargs):
     kwargs["return_list"] = True
     scan_outputs, updates = scan(*args, **kwargs)
 
+    # Filter out non-tensor outputs (e.g. RNG states)
+    from pytensor.tensor.type import TensorType
+
+    tensor_outputs = [s for s in scan_outputs if isinstance(s.type, TensorType)]
+
     # We don't recur on the rng so uniform numbers are the same every evaluation and on every call
     rng = shared(np.random.default_rng(123))
     factors = []
-    for s in scan_outputs:
+    for s in tensor_outputs:
         rng, f = rng.uniform(0.1, 0.9, size=s.shape)
         factors.append(f)
     return (
-        sum((s * f).sum() for s, f in zip(scan_outputs, factors, strict=True)),
+        sum((s * f).sum() for s, f in zip(tensor_outputs, factors, strict=True)),
         updates,
     )
 
@@ -588,12 +593,12 @@ class TestScan:
         assert np.allclose(pytensor_values, v_out)
 
     def test_oinp_iinp_iout_oout_mappings(self):
-        rng = RandomStream(123)
+        rng = pt.random.shared_rng(seed=123)
 
-        def inner_fct(seq, mitsot, sitsot, nitsot, nseq):
-            random_scalar = rng.uniform((1,))[0]
-            total = seq + mitsot + sitsot + nitsot + nseq + random_scalar
-            return total, total, total
+        def inner_fct(seq, mitsot_tm3, mitsot_tm1, sitsot, rng, nseq):
+            next_rng, random_scalar = rng.uniform(size=(1,))
+            total = seq + mitsot_tm1 + sitsot + nseq + random_scalar[0]
+            return total, total, total, next_rng
 
         # Assemble a scan with one sequence, one mitsot, one sitsot, one nitsot
         # a non-sequence and a random state to test the mappings.
@@ -603,13 +608,15 @@ class TestScan:
             dict(initial=vector(), taps=[-3, -1]),
             scalar(),
             None,
+            rng,
         ]
 
-        scan_outputs, _ = scan(
+        scan_outputs = scan(
             fn=inner_fct,
             sequences=seq,
             outputs_info=outputs_info,
             non_sequences=non_seq,
+            return_updates=False,
         )
 
         # Compare the mappings with the expected values
@@ -932,6 +939,7 @@ class TestScan:
         utt.assert_allclose(W2.get_value(), numpy_W2)
 
     def test_simple_shared_random(self):
+        # TODO: Remove once RandomStream and default_update support is removed
         pytensor_rng = RandomStream(utt.fetch_seed())
 
         values, updates = scan(
@@ -977,13 +985,12 @@ class TestScan:
         utt.assert_allclose(state.get_value(), numpy_state)
 
     def test_random_as_input_to_scan(self):
-        trng = RandomStream(123)
-
+        rng = pt.random.shared_rng(seed=123)
         x = matrix("x")
-        y = trng.binomial(1, x, size=x.shape)
-        z, updates = scan(lambda a: a, non_sequences=y, n_steps=2)
+        next_rng, y = rng.binomial(1, x, size=x.shape)
+        z = scan(lambda a: a, non_sequences=y, n_steps=2, return_updates=False)
 
-        f = function([x], [y, z], updates=updates, allow_input_downcast=True)
+        f = function([x], [y, z], updates={rng: next_rng}, allow_input_downcast=True)
 
         rng = np.random.default_rng(utt.fetch_seed())
         nx = rng.uniform(size=(10, 10))
@@ -1643,20 +1650,17 @@ class TestScan:
         u2 = ivector("u2")
         x0 = vector("x0", dtype=config.floatX)
 
-        def f_rnn_cmpl(u_t, u2_t, x_tm1, W_in):
-            trng1 = RandomStream(123)
-            x_t = (
-                pt.cast(u2_t, config.floatX)
-                + dot(u_t, W_in)
-                + x_tm1
-                + trng1.uniform(low=-1.1, high=1.1, dtype=config.floatX)
-            )
-            return x_t, 2 * u2_t
+        scan_rng = pt.random.shared_rng(seed=123)
+
+        def f_rnn_cmpl(u_t, u2_t, x_tm1, rng, W_in):
+            next_rng, noise = rng.uniform(low=-1.1, high=1.1, dtype=config.floatX)
+            x_t = pt.cast(u2_t, config.floatX) + dot(u_t, W_in) + x_tm1 + noise
+            return x_t, 2 * u2_t, next_rng
 
         cost, updates = scan_project_sum(
             f_rnn_cmpl,
             [u, u2],
-            [x0, None],
+            [x0, None, scan_rng],
             W_in,
             n_steps=None,
             truncate_gradient=-1,
@@ -1677,20 +1681,13 @@ class TestScan:
             allow_input_downcast=True,
         )
 
-        def reset_rng_fn(fn, *args):
-            # TODO: Get rid of all this `expanded_inputs` nonsense
-            for idx, arg in enumerate(fn.maker.expanded_inputs):
-                if arg.value and isinstance(arg.value.data, np.random.Generator):
-                    obj = fn.maker.expanded_inputs[idx].value
-                    obj.data = np.random.default_rng(123)
-                    fn.maker.expanded_inputs[idx].value = obj
-            return fn(*args)
-
         def reset_rng_cost_fn(*args):
-            return reset_rng_fn(cost_fn, *args)
+            scan_rng.set_value(np.random.default_rng(123))
+            return cost_fn(*args)
 
         def reset_rng_grad_fn(*args):
-            return reset_rng_fn(grad_fn, *args)
+            scan_rng.set_value(np.random.default_rng(123))
+            return grad_fn(*args)
 
         num_grad = multiple_outputs_numeric_grad(
             reset_rng_cost_fn,
@@ -1701,19 +1698,6 @@ class TestScan:
         max_err, _max_err_pos = num_grad.max_err(analytic_grad)
         assert max_err <= 1e-2
 
-        # Also validate that the mappings outer_inp_from_outer_out and
-        # outer_inp_from_inner_inp produce the correct results
-        scan_node = next(iter(updates.values())).owner
-
-        var_mappings = scan_node.op.get_oinp_iinp_iout_oout_mappings()
-        result = var_mappings["outer_inp_from_outer_out"]
-        expected_result = {0: 3, 1: 5, 2: 4}
-        assert result == expected_result
-
-        result = var_mappings["outer_inp_from_inner_inp"]
-        expected_result = {0: 1, 1: 2, 2: 3, 3: 4, 4: 6}
-        assert result == expected_result
-
     def test_grad_multiple_outs_some_truncate(self):
         rng = np.random.default_rng(utt.fetch_seed())
         vW_in = asarrayX(rng.uniform(-0.1, 0.1, size=(2, 2)))
@@ -1723,20 +1707,18 @@ class TestScan:
         W_in = matrix("win")
         u = matrix("u1")
         x0 = vector("x0")
-        # trng  = RandomStream(
-        #                                               utt.fetch_seed())
+        scan_rng = pt.random.shared_rng(seed=123)
 
-        def f_rnn_cmpl(u_t, x_tm1, W_in):
-            trng1 = RandomStream(123)
-            rnd_nb = trng1.uniform(-0.1, 0.1)
+        def f_rnn_cmpl(u_t, x_tm1, rng, W_in):
+            next_rng, rnd_nb = rng.uniform(-0.1, 0.1)
             x_t = dot(u_t, W_in) + x_tm1 + rnd_nb
             x_t = pt.cast(x_t, dtype=config.floatX)
-            return x_t
+            return x_t, next_rng
 
         cost, updates = scan_project_sum(
             f_rnn_cmpl,
             u,
-            x0,
+            [x0, scan_rng],
             W_in,
             n_steps=None,
             truncate_gradient=3,
@@ -1758,21 +1740,13 @@ class TestScan:
             allow_input_downcast=True,
         )
 
-        def reset_rng_fn(fn, *args):
-            # TODO: Get rid of all this `expanded_inputs` nonsense
-            for idx, arg in enumerate(fn.maker.expanded_inputs):
-                if arg.value and isinstance(arg.value.data, np.random.Generator):
-                    obj = fn.maker.expanded_inputs[idx].value
-                    obj.data = np.random.default_rng(123)
-                    fn.maker.expanded_inputs[idx].value = obj
-            out = fn(*args)
-            return out
-
         def reset_rng_cost_fn(*args):
-            return reset_rng_fn(cost_fn, *args)
+            scan_rng.set_value(np.random.default_rng(123))
+            return cost_fn(*args)
 
         def reset_rng_grad_fn(*args):
-            return reset_rng_fn(grad_fn, *args)
+            scan_rng.set_value(np.random.default_rng(123))
+            return grad_fn(*args)
 
         multiple_outputs_numeric_grad(reset_rng_cost_fn, [v_u, v_x0, vW_in])
 
@@ -2098,13 +2072,13 @@ class TestScan:
         v_eW = np.array(rng.uniform(size=(5, 5)) - 0.5, dtype=floatX)
         v_eh0 = np.array(rng.uniform(size=(5,)) - 0.5, dtype=floatX)
 
-        def rnn_fn(_u, _y, _W):
-            srng = RandomStream(seed)
-            tmp_val = (
-                _u + _y + srng.uniform(size=v_h0.shape) * np.asarray(1e-6, dtype=floatX)
-            )
+        scan_rng = pt.random.shared_rng(seed=seed)
+
+        def rnn_fn(_u, _y, _rng, _W):
+            next_rng, noise = _rng.uniform(size=v_h0.shape)
+            tmp_val = _u + _y + noise * np.asarray(1e-6, dtype=floatX)
             sl_o = tanh(dot(_W, tmp_val))
-            return sl_o, tmp_val
+            return sl_o, tmp_val, next_rng
 
         u = matrix("U")
         h0 = vector("h0")
@@ -2117,10 +2091,10 @@ class TestScan:
         _W = specify_shape(W, v_W.shape)
         _W.name = "_W"
 
-        [o, _], _ = scan(
+        [o, _, _], _ = scan(
             rnn_fn,
             sequences=_u,
-            outputs_info=[_h0, None],
+            outputs_info=[_h0, None, scan_rng],
             non_sequences=_W,
             name="rnn_fn",
         )
@@ -2520,23 +2494,26 @@ def test_mintap_onestep():
 def test_inner_get_vector_length():
     """Make sure we can handle/preserve fixed shape terms when cloning the body of a `Scan`."""
 
-    rng_pt = RandomStream()
+    rng = pt.random.shared_rng()
 
     s1 = lscalar("s1")
     s2 = lscalar("s2")
     size_pt = pt.as_tensor([s1, s2])
 
-    def scan_body(size):
+    def scan_body(rng, size):
         # `size` will be cloned and replaced with an ownerless `TensorVariable`.
         # This will cause `RandomVariable.infer_shape` to fail, because it expects
         # `get_vector_length` to work on all `size` arguments.
-        return rng_pt.normal(0, 1, size=size)
+        next_rng, x = rng.normal(0, 1, size=size)
+        return x, next_rng
 
-    res, _ = scan(
+    res, _final_rng = scan(
         scan_body,
+        outputs_info=[None, rng],
         non_sequences=[size_pt],
         n_steps=10,
         strict=True,
+        return_updates=False,
     )
 
     assert isinstance(res.owner.op, Scan)
@@ -2558,13 +2535,16 @@ def test_inner_get_vector_length():
     assert np.array_equal(res_fn((1, 2)), (10, 1, 2))
 
     # Second case has an empty size non-sequence
+    rng = pt.random.shared_rng()
     size_pt = pt.as_tensor([], dtype=np.int64)
 
-    res, _ = scan(
+    res, _final_rng = scan(
         scan_body,
+        outputs_info=[None, rng],
         non_sequences=[size_pt],
         n_steps=10,
         strict=True,
+        return_updates=False,
     )
 
     assert isinstance(res.owner.op, Scan)
@@ -2574,13 +2554,16 @@ def test_inner_get_vector_length():
     assert np.array_equal(res_fn(), (10,))
 
     # Third case has a constant size non-sequence
+    rng = pt.random.shared_rng()
     size_pt = pt.as_tensor([3], dtype=np.int64)
 
-    res, _ = scan(
+    res, _final_rng = scan(
         scan_body,
+        outputs_info=[None, rng],
         non_sequences=[size_pt],
         n_steps=10,
         strict=True,
+        return_updates=False,
     )
 
     assert isinstance(res.owner.op, Scan)
@@ -2680,30 +2663,37 @@ class TestExamples:
         bhid = shared(v_bhid, "vbhid")
         bvis = shared(v_bvis, "vbvis")
         vsample = matrix(dtype="float32")
-        trng = RandomStream(utt.fetch_seed())
+        rng_seed = np.random.SeedSequence(utt.fetch_seed())
+        rng_seed_1, rng_seed_2 = rng_seed.spawn(2)
+        rng_h = pt.random.shared_rng(value=np.random.default_rng(rng_seed_1))
+        rng_v = pt.random.shared_rng(value=np.random.default_rng(rng_seed_2))
 
-        def f(vsample_tm1):
+        def f(vsample_tm1, rng_h, rng_v):
             hmean_t = sigmoid(dot(vsample_tm1, W) + bhid)
-            hsample_t = pt.cast(
-                trng.binomial(1, hmean_t, size=hmean_t.shape), dtype="float32"
-            )
+            next_rng_h, hsample_t = rng_h.binomial(1, hmean_t, size=hmean_t.shape)
+            hsample_t = pt.cast(hsample_t, dtype="float32")
             vmean_t = sigmoid(dot(hsample_t, W.T) + bvis)
-            return pt.cast(
-                trng.binomial(1, vmean_t, size=vmean_t.shape), dtype="float32"
-            )
+            next_rng_v, vsample_t = rng_v.binomial(1, vmean_t, size=vmean_t.shape)
+            return pt.cast(vsample_t, dtype="float32"), next_rng_h, next_rng_v
 
-        pytensor_vsamples, updates = scan(
-            f, [], vsample, [], n_steps=10, truncate_gradient=-1, go_backwards=False
+        pytensor_vsamples, final_rng_h, final_rng_v = scan(
+            fn=f,
+            outputs_info=[vsample, rng_h, rng_v],
+            n_steps=10,
+            truncate_gradient=-1,
+            go_backwards=False,
+            return_updates=False,
         )
 
         my_f = function(
-            [vsample], pytensor_vsamples[-1], updates=updates, allow_input_downcast=True
+            [vsample],
+            pytensor_vsamples[-1],
+            updates={rng_h: final_rng_h, rng_v: final_rng_v},
+            allow_input_downcast=True,
         )
 
-        rng_seed = np.random.SeedSequence(utt.fetch_seed())
-        (rng_seed_1, rng_seed_2) = rng_seed.spawn(2)
-        nrng1 = trng.rng_ctor(rng_seed_1)
-        nrng2 = trng.rng_ctor(rng_seed_2)
+        nrng1 = np.random.default_rng(rng_seed_1)
+        nrng2 = np.random.default_rng(rng_seed_2)
 
         def numpy_implementation(vsample):
             for idx in range(10):
@@ -3355,14 +3345,14 @@ class TestExamples:
         test. The test case was modified from the original for simplicity
         """
 
+        # TODO: Convert to new RNG API. Blocked because nested scan clones
+        # RandomGeneratorVariable as plain TensorVariable, losing .uniform()/.multinomial() methods.
         rand_stream = RandomStream()
         inp = matrix()
         norm_inp = inp / pt_sum(inp, axis=0)
 
         def unit_dropout(out_idx):
             def stochastic_pooling(in_idx):
-                # sample the input matrix for each column according to the
-                # column values
                 pvals = norm_inp.T
                 sample = rand_stream.multinomial(1, pvals)
                 return inp + sample
@@ -3371,7 +3361,6 @@ class TestExamples:
                 fn=stochastic_pooling, sequences=pt.arange(inp.shape[0])
             )
 
-            # randomly add stuff to units
             rand_nums = rand_stream.binomial(1, 0.5, size=pooled.shape)
             return pooled + rand_nums, updates_inner
 
@@ -3445,25 +3434,30 @@ class TestExamples:
         some problems in Scan.infer_shape
         """
         x = vector("x")
+        rng = pt.random.shared_rng(seed=utt.fetch_seed())
 
-        def lm(m):
-            trng = RandomStream(utt.fetch_seed())
-            return [
-                2 * m + trng.uniform(-1.1, 1.1, dtype=config.floatX),
-                m + trng.uniform(size=[3]),
-            ]
+        def lm(m, rng):
+            rng, u1 = rng.uniform(-1.1, 1.1, dtype=config.floatX)
+            rng, u2 = rng.uniform(size=[3])
+            return [2 * m + u1, m + u2, rng]
 
-        [o1, _o2], updates = scan(
+        o1, _o2, final_rng = scan(
             lm,
             sequences=x,
+            outputs_info=[None, None, rng],
             n_steps=None,
             truncate_gradient=-1,
             name="forward",
             go_backwards=False,
+            return_updates=False,
         )
         go1 = grad(o1.mean(), wrt=x)
         f = function(
-            [x], go1, updates=updates, allow_input_downcast=True, mode=mode_with_opt
+            [x],
+            go1,
+            updates={rng: final_rng},
+            allow_input_downcast=True,
+            mode=mode_with_opt,
         )
         assert np.allclose(f([1, 2, 3]), 2.0 / 3)
 
@@ -3482,20 +3476,26 @@ class TestExamples:
         """
 
         x = scalar()
-        srng = RandomStream(0)
+        rng = pt.random.shared_rng(seed=0)
 
-        def inner_fct(previous_val):
-            new_val = previous_val + srng.uniform()
+        def inner_fct(previous_val, rng):
+            next_rng, u = rng.uniform()
+            new_val = previous_val + u
             condition = until(previous_val > 5)
-            return new_val, condition
+            return [new_val, next_rng], condition
 
-        out, updates = scan(inner_fct, outputs_info=x, n_steps=10)
+        out, final_rng = scan(
+            inner_fct,
+            outputs_info=[x, rng],
+            n_steps=10,
+            return_updates=False,
+        )
 
         g_out = grad(out.sum(), x)
         fct = function(
             [x],
             [out, g_out],
-            updates=updates,
+            updates={rng: final_rng},
         )
 
         for i in range(-5, 5):
@@ -3737,6 +3737,7 @@ class TestExamples:
             lambda op: op.info.n_sit_sot > 0,
         ),
         # nit-sot, shared input/output
+        # TODO: Remove once RandomStream and default_update support is removed
         (
             lambda: RandomStream().normal(0, 1, name="a"),
             [],
