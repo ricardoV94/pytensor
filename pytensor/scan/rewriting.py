@@ -35,7 +35,6 @@ from pytensor.graph.rewriting.utils import get_clients_at_depth
 from pytensor.graph.traversal import (
     ancestors,
     apply_depends_on,
-    graph_inputs,
 )
 from pytensor.graph.type import HasShape
 from pytensor.graph.utils import InconsistencyError
@@ -85,126 +84,146 @@ list_opt_slice = [
 ]
 
 
-@node_rewriter([Scan])
-def remove_constants_and_unused_inputs_scan(fgraph, node):
-    """Move constants into the inner graph, and remove unused inputs.
+def _inner_outer_input_ranges(op):
+    """Slices into ``(inner_inputs, outer_inputs)`` for seqs and non_seqs."""
+    info = op.info
+    n_ns_in_outer = (
+        1
+        + info.n_seqs
+        + info.n_mit_mot
+        + info.n_mit_sot
+        + info.n_sit_sot
+        + info.n_untraced_sit_sot
+        + info.n_nit_sot
+    )
+    n_ns_in_inner = len(op.inner_inputs) - info.n_non_seqs
+    return {
+        "inner_seqs": slice(0, info.n_seqs),
+        "outer_seqs": slice(1, 1 + info.n_seqs),
+        "inner_non_seqs": slice(n_ns_in_inner, len(op.inner_inputs)),
+        "outer_non_seqs": slice(n_ns_in_outer, None),
+    }
 
-    Constants that are in the outer graph are represented by a free symbolic
-    variable in the inner graph. If we move them into the inner graph,
-    constant-folding can happen in the inner graph.
-    This is applied only on sequences and non-sequences,
-    not on initial states.
 
+def _rebuild_scan_with_givens(op, node, givens):
+    """Clone the inner outputs under ``givens`` and rebuild the Scan node.
+
+    The rewrite leaves the inner input list intact; the substituted inner
+    variables simply become unreferenced, and ``scan_remove_unused`` drops
+    them on the next equilibrium pass.
     """
-    if not isinstance(node.op, Scan):
-        return False
+    new_inner_outs = clone_replace(op.inner_outputs, replace=givens)
+    new_op = Scan(
+        op.inner_inputs,
+        new_inner_outs,
+        op.info,
+        mode=op.mode,
+        profile=op.profile,
+        truncate_gradient=op.truncate_gradient,
+        name=op.name,
+        allow_gc=op.allow_gc,
+    )
+    new_outs = new_op(*node.inputs, return_list=True)
+    return dict([("remove", [node]), *zip(node.outputs, new_outs, strict=True)])
+
+
+@node_rewriter([Scan])
+def scan_inline_invariant_constants(fgraph, node):
+    """Inline compile-time-constant, iteration-invariant inputs into the inner graph.
+
+    Covers:
+      * Non-sequences whose outer input is a ``Constant``.
+      * Sequences whose outer input is a ``TensorConstant`` with a uniform
+        value (``unique_value`` set) -- collapsed to that scalar.
+
+    Once the inner input is replaced by the constant, inner
+    constant-folding can fire. The now-unreferenced inner input is left
+    for ``scan_remove_unused`` to drop on a subsequent pass.
+    """
     op = node.op
-    op_info = op.info
-    # We only need to take care of sequences and other arguments
-    st = op_info.n_seqs
-    st += int(
-        sum(len(x) for x in chain(op_info.mit_mot_in_slices, op_info.mit_sot_in_slices))
-    )
-    st += op_info.n_sit_sot
-    st += op_info.n_untraced_sit_sot
+    ranges = _inner_outer_input_ranges(op)
+    # Only rewrite if the inner variable is still referenced by some inner
+    # output; otherwise we'd trivially fire forever (clone_replace no-ops on
+    # an unreferenced variable, so the equilibrium never converges).
+    live_inner_vars = set(ancestors(op.inner_outputs))
 
-    op_ins = op.inner_inputs
-    op_outs = op.inner_outputs
+    givens: dict = {}
 
-    # Corresponds to the initial states, which should stay untouched.
-    # We put those variables aside, and put them back at the end.
-    out_stuff_inner = op_ins[op_info.n_seqs : st]
-
-    non_seqs = op_ins[st:]
-    st = (
-        op_info.n_seqs
-        + op_info.n_mit_mot
-        + op_info.n_mit_sot
-        + op_info.n_sit_sot
-        + op_info.n_nit_sot
-        + op_info.n_untraced_sit_sot
-        + 1
-    )
-    outer_non_seqs = node.inputs[st:]
-    out_stuff_outer = node.inputs[1 + op_info.n_seqs : st]
-
-    # To replace constants in the outer graph by clones in the inner graph
-    givens = {}
-    # All the inputs of the inner graph of the new scan
-    nw_inner = []
-    # Same for the outer graph, initialized w/ number of steps
-    nw_outer = [node.inputs[0]]
-
-    all_ins = list(graph_inputs(op_outs))
-    for idx in range(op_info.n_seqs):
-        node_inp = node.inputs[idx + 1]
-        if isinstance(node_inp, TensorConstant) and node_inp.unique_value is not None:
+    # Sequences with a uniform constant value: collapse to the scalar.
+    inner_seqs = op.inner_inputs[ranges["inner_seqs"]]
+    outer_seqs = node.inputs[ranges["outer_seqs"]]
+    for inner, outer in zip(inner_seqs, outer_seqs, strict=True):
+        if (
+            inner in live_inner_vars
+            and isinstance(outer, TensorConstant)
+            and outer.unique_value is not None
+        ):
             try:
-                # This works if input is a constant that has all entries
-                # equal
-                givens[op_ins[idx]] = node_inp[0]
+                givens[inner] = outer[0]
             except TypeError:
                 pass
-        elif op_ins[idx] in all_ins:
-            # Check for identical other sequence
-            identical_seqs = [
-                x for x in nw_outer if equal_computations([x], [node_inp])
-            ]
-            if identical_seqs:
-                index = node.inputs.index(identical_seqs[0]) - 1
-                givens[op_ins[idx]] = op_ins[index]
-            else:
-                nw_inner.append(op_ins[idx])
-                nw_outer.append(node_inp)
 
-    nw_n_seqs = len(nw_inner)
-    # Add outputs stuff
-    nw_inner += out_stuff_inner
-    nw_outer += out_stuff_outer
+    # Constant non-sequences: inline the Constant itself.
+    inner_non_seqs = op.inner_inputs[ranges["inner_non_seqs"]]
+    outer_non_seqs = node.inputs[ranges["outer_non_seqs"]]
+    givens.update(
+        {
+            inner: outer
+            for inner, outer in zip(inner_non_seqs, outer_non_seqs, strict=True)
+            if inner in live_inner_vars and isinstance(outer, Constant)
+        }
+    )
 
-    # Look through non sequences
-    nw_inner_nonseq = []
-    nw_outer_nonseq = []
-    for idx, (nw_in, nw_out) in enumerate(zip(non_seqs, outer_non_seqs, strict=True)):
-        if isinstance(nw_out, Constant):
-            givens[nw_in] = nw_out
-        elif nw_in in all_ins:
-            # Indices of elements of nw_outer_nonseq that are equivalent
-            # to nw_out.
-            identical_nonseq_idx = [
-                i
-                for (i, x) in enumerate(nw_outer_nonseq)
-                if equal_computations([x], [nw_out])
-            ]
-            if identical_nonseq_idx:
-                givens[nw_in] = nw_inner_nonseq[identical_nonseq_idx[0]]
-            else:
-                nw_inner_nonseq.append(nw_in)
-                nw_outer_nonseq.append(nw_out)
-
-    nw_inner.extend(nw_inner_nonseq)
-    nw_outer.extend(nw_outer_nonseq)
-
-    if len(nw_inner) != len(op_ins):
-        op_outs = clone_replace(op_outs, replace=givens)
-        nw_info = dataclasses.replace(
-            op_info, n_seqs=nw_n_seqs, n_non_seqs=len(nw_inner_nonseq)
-        )
-        nwScan = Scan(
-            nw_inner,
-            op_outs,
-            nw_info,
-            mode=op.mode,
-            profile=op.profile,
-            truncate_gradient=op.truncate_gradient,
-            # TODO: This seems questionable
-            name=op.name,
-            allow_gc=op.allow_gc,
-        )
-        nw_outs = nwScan(*nw_outer, return_list=True)
-        return dict([("remove", [node]), *zip(node.outputs, nw_outs, strict=True)])
-    else:
+    if not givens:
         return False
+    return _rebuild_scan_with_givens(op, node, givens)
+
+
+@node_rewriter([Scan])
+def scan_merge_duplicate_inputs(fgraph, node):
+    """Merge outer seqs / non_seqs that are ``equal_computations``.
+
+    For each duplicate outer input, the corresponding inner variable is
+    redirected to the first occurrence's inner variable. The duplicate
+    inner input is left unreferenced for ``scan_remove_unused`` to drop.
+    """
+    op = node.op
+    ranges = _inner_outer_input_ranges(op)
+    # Only consider inner vars that are actually referenced -- otherwise the
+    # rewrite would fire trivially forever.
+    live_inner_vars = set(ancestors(op.inner_outputs))
+
+    def _duplicates(inner_list, outer_list):
+        givens = {}
+        canonical: list[tuple] = []  # (outer, inner) pairs kept so far
+        for inner, outer in zip(inner_list, outer_list, strict=True):
+            if inner not in live_inner_vars:
+                continue
+            for canon_outer, canon_inner in canonical:
+                if equal_computations([outer], [canon_outer]):
+                    givens[inner] = canon_inner
+                    break
+            else:
+                canonical.append((outer, inner))
+        return givens
+
+    givens: dict = {}
+    givens.update(
+        _duplicates(
+            op.inner_inputs[ranges["inner_seqs"]],
+            node.inputs[ranges["outer_seqs"]],
+        )
+    )
+    givens.update(
+        _duplicates(
+            op.inner_inputs[ranges["inner_non_seqs"]],
+            node.inputs[ranges["outer_non_seqs"]],
+        )
+    )
+
+    if not givens:
+        return False
+    return _rebuild_scan_with_givens(op, node, givens)
 
 
 @node_rewriter([Scan])
@@ -3115,9 +3134,14 @@ scan_eqopt1.register("all_pushout_opt", scan_seqopt1, "fast_run", "scan")
 
 
 scan_seqopt1.register(
-    "scan_remove_constants_and_unused_inputs0",
-    dfs_rewriter(remove_constants_and_unused_inputs_scan, ignore_newtrees=True),
-    "remove_constants_and_unused_inputs_scan",
+    "scan_inline_and_merge_inputs0",
+    dfs_rewriter(
+        scan_inline_invariant_constants,
+        scan_merge_duplicate_inputs,
+        ignore_newtrees=True,
+    ),
+    "scan_inline_invariant_constants",
+    "scan_merge_duplicate_inputs",
     "fast_run",
     "scan",
     position=1,
@@ -3184,9 +3208,14 @@ scan_eqopt2.register(
 
 
 scan_eqopt2.register(
-    "scan_remove_constants_and_unused_inputs1",
-    dfs_rewriter(remove_constants_and_unused_inputs_scan, ignore_newtrees=True),
-    "remove_constants_and_unused_inputs_scan",
+    "scan_inline_and_merge_inputs1",
+    dfs_rewriter(
+        scan_inline_invariant_constants,
+        scan_merge_duplicate_inputs,
+        ignore_newtrees=True,
+    ),
+    "scan_inline_invariant_constants",
+    "scan_merge_duplicate_inputs",
     "fast_run",
     "scan",
 )
@@ -3199,9 +3228,14 @@ scan_eqopt2.register("scan_merge", ScanMerge(), "fast_run", "scan")
 
 # After Merge optimization
 scan_eqopt2.register(
-    "scan_remove_constants_and_unused_inputs2",
-    dfs_rewriter(remove_constants_and_unused_inputs_scan, ignore_newtrees=True),
-    "remove_constants_and_unused_inputs_scan",
+    "scan_inline_and_merge_inputs2",
+    dfs_rewriter(
+        scan_inline_invariant_constants,
+        scan_merge_duplicate_inputs,
+        ignore_newtrees=True,
+    ),
+    "scan_inline_invariant_constants",
+    "scan_merge_duplicate_inputs",
     "fast_run",
     "scan",
 )
@@ -3222,9 +3256,14 @@ scan_eqopt2.register(
 
 # After everything else
 scan_eqopt2.register(
-    "scan_remove_constants_and_unused_inputs3",
-    dfs_rewriter(remove_constants_and_unused_inputs_scan, ignore_newtrees=True),
-    "remove_constants_and_unused_inputs_scan",
+    "scan_inline_and_merge_inputs3",
+    dfs_rewriter(
+        scan_inline_invariant_constants,
+        scan_merge_duplicate_inputs,
+        ignore_newtrees=True,
+    ),
+    "scan_inline_invariant_constants",
+    "scan_merge_duplicate_inputs",
     "fast_run",
     "scan",
 )
