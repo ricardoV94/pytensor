@@ -1971,6 +1971,383 @@ def scan_sit_sot_to_untraced(fgraph, node):
     return replacements
 
 
+@node_rewriter([Scan])
+def scan_remove_unused(fgraph, node):
+    """Drop Scan state slots whose outer output has no clients and whose
+    inner inputs are not reachable from any surviving inner output.
+
+    Pure reachability / DCE. Works on any `Scan` -- forward, backward,
+    multi-output -- and on any state kind:
+
+      * ``mit_mot``, ``mit_sot``: dropped only when the whole state is
+        dead (outer output unused AND none of its tap inner inputs is an
+        ancestor of a surviving inner output). Partial-tap trimming is
+        deliberately out of scope.
+      * ``sit_sot``, ``untraced_sit_sot``: single-tap, dropped as above.
+      * ``nit_sot``: no inner input; dropped whenever the outer output
+        has no client.
+    """
+    op = node.op
+    info = op.info
+
+    n_seqs = info.n_seqs
+    n_mit_mot = info.n_mit_mot
+    n_mit_sot = info.n_mit_sot
+    n_sit_sot = info.n_sit_sot
+    n_nit_sot = info.n_nit_sot
+    n_untraced_sit_sot = info.n_untraced_sit_sot
+
+    # Inner-input slot ranges per state category (all relative to the start
+    # of the inner input list, which is laid out as:
+    #   seqs | mit_mot_taps | mit_sot_taps | sit_sot | untraced_sit_sot | non_seqs
+    mm_in_lens = [len(s) for s in info.mit_mot_in_slices]
+    ms_in_lens = [len(s) for s in info.mit_sot_in_slices]
+
+    mm_in_start = n_seqs
+    ms_in_start = mm_in_start + sum(mm_in_lens)
+    ss_in_start = ms_in_start + sum(ms_in_lens)
+    us_in_start = ss_in_start + n_sit_sot
+
+    # Inner-output slot ranges:
+    #   mit_mot_outs | mit_sot | sit_sot | nit_sot | untraced_sit_sot
+    mm_out_lens = [len(s) for s in info.mit_mot_out_slices]
+    mm_out_start = 0
+    ms_out_start = mm_out_start + sum(mm_out_lens)
+    ss_out_start = ms_out_start + n_mit_sot
+    ns_out_start = ss_out_start + n_sit_sot
+    us_out_start = ns_out_start + n_nit_sot
+
+    # Outer output layout:
+    #   mit_mot | mit_sot | sit_sot | nit_sot | untraced_sit_sot
+    outer_mm_start = 0
+    outer_ms_start = outer_mm_start + n_mit_mot
+    outer_ss_start = outer_ms_start + n_mit_sot
+    outer_ns_start = outer_ss_start + n_sit_sot
+    outer_us_start = outer_ns_start + n_nit_sot
+
+    def _has_clients(outer_idx):
+        return bool(fgraph.clients.get(node.outputs[outer_idx]))
+
+    # 1. Identify candidates for removal by outer-output client check.
+    # Each entry: (category, outer_idx, inner_in_slice, inner_out_slice)
+    candidates = []
+
+    mm_in_cursor = mm_in_start
+    for k in range(n_mit_mot):
+        in_s = mm_in_cursor
+        in_e = in_s + mm_in_lens[k]
+        out_s = mm_out_start + sum(mm_out_lens[:k])
+        out_e = out_s + mm_out_lens[k]
+        mm_in_cursor = in_e
+        if not _has_clients(outer_mm_start + k):
+            candidates.append(("mit_mot", k, (in_s, in_e), (out_s, out_e)))
+
+    ms_in_cursor = ms_in_start
+    for k in range(n_mit_sot):
+        in_s = ms_in_cursor
+        in_e = in_s + ms_in_lens[k]
+        out_s = ms_out_start + k
+        out_e = out_s + 1
+        ms_in_cursor = in_e
+        if not _has_clients(outer_ms_start + k):
+            candidates.append(("mit_sot", k, (in_s, in_e), (out_s, out_e)))
+
+    for k in range(n_sit_sot):
+        in_s = ss_in_start + k
+        in_e = in_s + 1
+        out_s = ss_out_start + k
+        out_e = out_s + 1
+        if not _has_clients(outer_ss_start + k):
+            candidates.append(("sit_sot", k, (in_s, in_e), (out_s, out_e)))
+
+    for k in range(n_nit_sot):
+        out_s = ns_out_start + k
+        out_e = out_s + 1
+        if not _has_clients(outer_ns_start + k):
+            candidates.append(("nit_sot", k, (0, 0), (out_s, out_e)))
+
+    for k in range(n_untraced_sit_sot):
+        in_s = us_in_start + k
+        in_e = in_s + 1
+        out_s = us_out_start + k
+        out_e = out_s + 1
+        if not _has_clients(outer_us_start + k):
+            candidates.append(("untraced_sit_sot", k, (in_s, in_e), (out_s, out_e)))
+
+    # 2. Iteratively confirm candidates. A candidate is droppable only if
+    # none of its inner inputs is reachable from the inner outputs of
+    # *surviving* states (states not currently marked droppable). Start
+    # optimistic -- all candidates provisionally droppable -- and un-confirm
+    # any whose inputs turn out to be needed elsewhere. Fixpoint: when no
+    # candidate gets un-confirmed in a pass, we're done. Even with no
+    # candidate outputs we still run one pass to compute
+    # ``surviving_ancestors`` for the seq / non_seq staleness check below.
+    confirmed_idxs: set[int] = set(range(len(candidates)))
+    while True:
+        # Track dropped inner outputs by POSITIONAL index, not by variable.
+        # The same Variable can appear in multiple inner-output slots; if one
+        # slot survives and another is dropped, the variable is still needed.
+        dropped_inner_out_positions: set[int] = set()
+        for i, (_cat, _k, _in, (o_s, o_e)) in enumerate(candidates):
+            if i not in confirmed_idxs:
+                continue
+            for j in range(o_s, o_e):
+                dropped_inner_out_positions.add(j)
+
+        surviving_outs = [
+            v
+            for j, v in enumerate(op.inner_outputs)
+            if j not in dropped_inner_out_positions
+        ]
+        surviving_ancestors = set(ancestors(surviving_outs))
+
+        changed = False
+        for i in list(confirmed_idxs):
+            _cat, _k, (i_s, i_e), _out = candidates[i]
+            inputs_needed_elsewhere = any(
+                op.inner_inputs[j] in surviving_ancestors for j in range(i_s, i_e)
+            )
+            if inputs_needed_elsewhere:
+                confirmed_idxs.discard(i)
+                changed = True
+        if not changed:
+            break
+
+    # After the fixpoint, ``surviving_ancestors`` is the final inner-graph
+    # cone of everything we're keeping. Any seq / non_seq inner input not
+    # in that cone is stale -- either as a direct consequence of the state
+    # drops above, or because it was never referenced to begin with.
+    # Output-drop decisions cannot change from this cleanup: removing an
+    # input that was already outside the cone doesn't shrink the cone.
+    n_seqs = op.info.n_seqs
+    mm_in_lens = [len(s) for s in op.info.mit_mot_in_slices]
+    ms_in_lens = [len(s) for s in op.info.mit_sot_in_slices]
+    ns_in_start = (
+        n_seqs
+        + sum(mm_in_lens)
+        + sum(ms_in_lens)
+        + op.info.n_sit_sot
+        + op.info.n_untraced_sit_sot
+    )
+    n_non_seqs = len(op.inner_inputs) - ns_in_start
+    drop_seqs = {
+        k for k in range(n_seqs) if op.inner_inputs[k] not in surviving_ancestors
+    }
+    drop_non_seqs = {
+        k
+        for k in range(n_non_seqs)
+        if op.inner_inputs[ns_in_start + k] not in surviving_ancestors
+    }
+
+    if not confirmed_idxs and not drop_seqs and not drop_non_seqs:
+        return None
+
+    return _scan_drop_states(
+        op,
+        node,
+        [candidates[i] for i in sorted(confirmed_idxs)],
+        drop_seqs,
+        drop_non_seqs,
+    )
+
+
+def _scan_drop_states(op, node, drops, drop_seqs, drop_non_seqs):
+    """Rebuild ``node`` (a Scan) with the specified state slots and stale
+    seqs / non_seqs removed.
+
+    Each entry in ``drops`` was selected because its outer output had no
+    clients at the time ``scan_remove_unused`` inspected the fgraph,
+    so the dropped outputs have no replacement mapping -- they disappear
+    when the old node is removed via ``replacements["remove"]``.
+    """
+    info = op.info
+    n_seqs = info.n_seqs
+    mm_in_lens = [len(s) for s in info.mit_mot_in_slices]
+    ms_in_lens = [len(s) for s in info.mit_sot_in_slices]
+    ns_in_start = (
+        n_seqs
+        + sum(mm_in_lens)
+        + sum(ms_in_lens)
+        + info.n_sit_sot
+        + info.n_untraced_sit_sot
+    )
+    n_non_seqs = len(op.inner_inputs) - ns_in_start
+
+    drop_mm = {k for (cat, k, _, _) in drops if cat == "mit_mot"}
+    drop_ms = {k for (cat, k, _, _) in drops if cat == "mit_sot"}
+    drop_ss = {k for (cat, k, _, _) in drops if cat == "sit_sot"}
+    drop_ns = {k for (cat, k, _, _) in drops if cat == "nit_sot"}
+    drop_us = {k for (cat, k, _, _) in drops if cat == "untraced_sit_sot"}
+
+    keep_seqs = [k for k in range(n_seqs) if k not in drop_seqs]
+    keep_mm = [k for k in range(info.n_mit_mot) if k not in drop_mm]
+    keep_ms = [k for k in range(info.n_mit_sot) if k not in drop_ms]
+    keep_ss = [k for k in range(info.n_sit_sot) if k not in drop_ss]
+    keep_ns = [k for k in range(info.n_nit_sot) if k not in drop_ns]
+    keep_us = [k for k in range(info.n_untraced_sit_sot) if k not in drop_us]
+    keep_non_seqs = [k for k in range(n_non_seqs) if k not in drop_non_seqs]
+
+    new_info = dataclasses.replace(
+        info,
+        n_seqs=len(keep_seqs),
+        mit_mot_in_slices=tuple(info.mit_mot_in_slices[k] for k in keep_mm),
+        mit_mot_out_slices=tuple(info.mit_mot_out_slices[k] for k in keep_mm),
+        mit_sot_in_slices=tuple(info.mit_sot_in_slices[k] for k in keep_ms),
+        sit_sot_in_slices=tuple(info.sit_sot_in_slices[k] for k in keep_ss),
+        n_nit_sot=len(keep_ns),
+        n_untraced_sit_sot=len(keep_us),
+        n_non_seqs=len(keep_non_seqs),
+    )
+
+    # Rebuild inner inputs.
+    mm_in_start = n_seqs
+    ms_in_start = mm_in_start + sum(mm_in_lens)
+    ss_in_start = ms_in_start + sum(ms_in_lens)
+    us_in_start = ss_in_start + info.n_sit_sot
+    seqs_in = [op.inner_inputs[k] for k in keep_seqs]
+    mm_in = [
+        v
+        for k in keep_mm
+        for v in op.inner_inputs[
+            mm_in_start + sum(mm_in_lens[:k]) : mm_in_start + sum(mm_in_lens[: k + 1])
+        ]
+    ]
+    ms_in = [
+        v
+        for k in keep_ms
+        for v in op.inner_inputs[
+            ms_in_start + sum(ms_in_lens[:k]) : ms_in_start + sum(ms_in_lens[: k + 1])
+        ]
+    ]
+    ss_in = [op.inner_inputs[ss_in_start + k] for k in keep_ss]
+    us_in = [op.inner_inputs[us_in_start + k] for k in keep_us]
+    non_seqs_in = [op.inner_inputs[ns_in_start + k] for k in keep_non_seqs]
+    new_inner_inputs = seqs_in + mm_in + ms_in + ss_in + us_in + non_seqs_in
+
+    # Rebuild inner outputs.
+    mm_out_lens = [len(s) for s in info.mit_mot_out_slices]
+    mm_out_start = 0
+    ms_out_start = mm_out_start + sum(mm_out_lens)
+    ss_out_start = ms_out_start + info.n_mit_sot
+    ns_out_start = ss_out_start + info.n_sit_sot
+    us_out_start = ns_out_start + info.n_nit_sot
+    mm_out = [
+        v
+        for k in keep_mm
+        for v in op.inner_outputs[
+            mm_out_start + sum(mm_out_lens[:k]) : mm_out_start
+            + sum(mm_out_lens[: k + 1])
+        ]
+    ]
+    ms_out = [op.inner_outputs[ms_out_start + k] for k in keep_ms]
+    ss_out = [op.inner_outputs[ss_out_start + k] for k in keep_ss]
+    ns_out = [op.inner_outputs[ns_out_start + k] for k in keep_ns]
+    us_out = [op.inner_outputs[us_out_start + k] for k in keep_us]
+    # while_cond tail if any (as_while)
+    extra_out = list(op.inner_outputs[us_out_start + info.n_untraced_sit_sot :])
+    new_inner_outputs = mm_out + ms_out + ss_out + ns_out + us_out + extra_out
+
+    # Rebuild outer inputs. Layout:
+    #   [n_steps] [seqs] [mit_mot_tapes] [mit_sot_tapes] [sit_sot_inits]
+    #   [untraced_sit_sot_inits] [nit_sot_shapes] [non_seqs]
+    outer_seqs_start = 1
+    outer_mm_start = outer_seqs_start + n_seqs
+    outer_ms_start = outer_mm_start + info.n_mit_mot
+    outer_ss_start = outer_ms_start + info.n_mit_sot
+    outer_us_start = outer_ss_start + info.n_sit_sot
+    outer_ns_start = outer_us_start + info.n_untraced_sit_sot
+    outer_non_start = outer_ns_start + info.n_nit_sot
+
+    new_outer_inputs = (
+        [node.inputs[0]]
+        + [node.inputs[outer_seqs_start + k] for k in keep_seqs]
+        + [node.inputs[outer_mm_start + k] for k in keep_mm]
+        + [node.inputs[outer_ms_start + k] for k in keep_ms]
+        + [node.inputs[outer_ss_start + k] for k in keep_ss]
+        + [node.inputs[outer_us_start + k] for k in keep_us]
+        + [node.inputs[outer_ns_start + k] for k in keep_ns]
+        + [node.inputs[outer_non_start + k] for k in keep_non_seqs]
+    )
+
+    assert len(new_inner_inputs) == new_info.n_inner_inputs, (
+        f"inner input count mismatch: got {len(new_inner_inputs)} "
+        f"expected {new_info.n_inner_inputs}"
+    )
+    assert len(new_inner_outputs) == new_info.n_inner_outputs, (
+        f"inner output count mismatch: got {len(new_inner_outputs)} "
+        f"expected {new_info.n_inner_outputs}"
+    )
+    assert len(new_outer_inputs) == new_info.n_outer_inputs, (
+        f"outer input count mismatch: got {len(new_outer_inputs)} "
+        f"expected {new_info.n_outer_inputs}"
+    )
+
+    new_op = Scan(
+        new_inner_inputs,
+        new_inner_outputs,
+        new_info,
+        mode=op.mode,
+        profile=op.profile,
+        truncate_gradient=op.truncate_gradient,
+        name=op.name,
+        allow_gc=op.allow_gc,
+    )
+    new_outs = new_op(*new_outer_inputs, return_list=True)
+
+    # Map old outputs -> new outputs. A dropped output is only marked as a
+    # candidate when it has no clients, so it needs no replacement at all --
+    # when the owning Apply is removed the orphaned output disappears with it.
+    # For kept states, reroute to the corresponding new output.
+    replacements: dict = {}
+    new_mm_out_start = 0
+    new_ms_out_start = new_mm_out_start + len(keep_mm)
+    new_ss_out_start = new_ms_out_start + len(keep_ms)
+    new_ns_out_start = new_ss_out_start + len(keep_ss)
+    new_us_out_start = new_ns_out_start + len(keep_ns)
+
+    mm_out_cursor = new_mm_out_start
+    for k in range(info.n_mit_mot):
+        if k in drop_mm:
+            continue
+        replacements[node.outputs[k]] = new_outs[mm_out_cursor]
+        mm_out_cursor += 1
+
+    ms_out_cursor = new_ms_out_start
+    for k in range(info.n_mit_sot):
+        if k in drop_ms:
+            continue
+        replacements[node.outputs[info.n_mit_mot + k]] = new_outs[ms_out_cursor]
+        ms_out_cursor += 1
+
+    ss_out_cursor = new_ss_out_start
+    for k in range(info.n_sit_sot):
+        if k in drop_ss:
+            continue
+        replacements[node.outputs[info.n_mit_mot + info.n_mit_sot + k]] = new_outs[
+            ss_out_cursor
+        ]
+        ss_out_cursor += 1
+
+    ns_out_cursor = new_ns_out_start
+    for k in range(info.n_nit_sot):
+        if k in drop_ns:
+            continue
+        old_idx = info.n_mit_mot + info.n_mit_sot + info.n_sit_sot + k
+        replacements[node.outputs[old_idx]] = new_outs[ns_out_cursor]
+        ns_out_cursor += 1
+
+    us_out_cursor = new_us_out_start
+    for k in range(info.n_untraced_sit_sot):
+        if k in drop_us:
+            continue
+        old_idx = info.n_mit_mot + info.n_mit_sot + info.n_sit_sot + info.n_nit_sot + k
+        replacements[node.outputs[old_idx]] = new_outs[us_out_cursor]
+        us_out_cursor += 1
+
+    replacements["remove"] = [node]
+    return replacements
+
+
 class ScanMerge(GraphRewriter):
     r"""Graph optimizer that merges different scan ops.
 
@@ -2844,6 +3221,13 @@ scan_eqopt2.register(
 scan_eqopt2.register(
     "scan_merge_inouts",
     dfs_rewriter(scan_merge_inouts, ignore_newtrees=True),
+    "fast_run",
+    "scan",
+)
+
+scan_eqopt2.register(
+    "scan_remove_unused",
+    scan_remove_unused,
     "fast_run",
     "scan",
 )

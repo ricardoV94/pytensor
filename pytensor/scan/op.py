@@ -75,6 +75,7 @@ from pytensor.graph.basic import (
     Variable,
 )
 from pytensor.graph.features import NoOutputFromInplace
+from pytensor.graph.fg import FunctionGraph
 from pytensor.graph.op import HasInnerGraph, Op, io_connection_pattern
 from pytensor.graph.replace import clone_replace
 from pytensor.graph.traversal import graph_inputs
@@ -3054,7 +3055,7 @@ class Scan(Op, ScanMethodsMixin, HasInnerGraph):
             as_while=False,
         )
 
-        local_op = Scan(
+        pullback_scan_op = Scan(
             inner_gfn_ins,
             inner_gfn_outs,
             out_info,
@@ -3064,7 +3065,8 @@ class Scan(Op, ScanMethodsMixin, HasInnerGraph):
             name=f"grad_of_{self.name}" if self.name else None,
             allow_gc=self.allow_gc,
         )
-        outputs = local_op(*outer_inputs, return_list=True)
+        pullback_scan_node = pullback_scan_op.make_node(*outer_inputs)
+        outputs = pullback_scan_node.outputs
         # Re-order the gradients correctly
         gradients = [disconnected_type()]  # n_steps is disconnected
 
@@ -3178,6 +3180,7 @@ class Scan(Op, ScanMethodsMixin, HasInnerGraph):
         # from a computational point of view
         # The gradients of scan are computed replacing Disconnected with 0,
         # because through the recurrence they can become nonzero
+        all_output_grads_connected = True
         for idx in range(len(gradients)):
             disconnected = True
             for kdx in range(len(node.outputs)):
@@ -3186,8 +3189,26 @@ class Scan(Op, ScanMethodsMixin, HasInnerGraph):
                 ):
                     disconnected = False
             if disconnected:
+                all_output_grads_connected = False
                 gradients[idx] = disconnected_type()
-        return gradients
+
+        if all_output_grads_connected:
+            return gradients
+
+        # The pullback scan is built fully-connected (zeros passed in for
+        # disconnected cotangents) to keep the construction simple. When some
+        # output grads are disconnected, eagerly run ``scan_remove_unused`` on
+        # the pullback node so the gradient graph handed back to the caller
+        # doesn't carry dead outputs / orphaned seqs.
+        from pytensor.scan.rewriting import scan_remove_unused  # avoid circular
+
+        fgraph = FunctionGraph(outputs=list(gradients), clone=False)
+        replacements = scan_remove_unused.fn(fgraph, pullback_scan_node)
+        if not replacements:
+            return gradients
+        replacements.pop("remove", None)
+        fgraph.replace_all(replacements.items(), reason="pullback_cleanup")
+        return list(fgraph.outputs)
 
     def pushforward(self, inputs, outputs, eval_points):
         # Step 0. Prepare some shortcut variable
