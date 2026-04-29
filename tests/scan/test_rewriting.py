@@ -17,7 +17,12 @@ from pytensor.graph.rewriting.basic import in2out
 from pytensor.graph.traversal import ancestors
 from pytensor.link.basic import JITLinker
 from pytensor.scan.op import Scan, ScanInfo
-from pytensor.scan.rewriting import ScanInplaceOptimizer, ScanMerge, scan_remove_unused
+from pytensor.scan.rewriting import (
+    ScanInplaceOptimizer,
+    ScanMerge,
+    scan_merge_subtensor_chain,
+    scan_remove_unused,
+)
 from pytensor.scan.utils import until
 from pytensor.tensor import stack
 from pytensor.tensor.basic import AllocEmpty
@@ -1904,6 +1909,35 @@ class TestSaveMem:
 
         np.testing.assert_allclose(fn(0), np.arange(1, 11)[:5])
 
+    def test_save_mem_chain_with_intermediate_trailing_slice(self):
+        # Regression: ``scan_merge_subtensor_chain`` must replay trailing-axis
+        # indices on intermediate ``Subtensor`` nodes. Apply only that rewrite
+        # to a fresh FunctionGraph so other rewriters (especially
+        # ``local_subtensor_merge``) can't pre-collapse the chain.
+        x0 = pt.vector("x0")
+        xs = scan(
+            lambda xtm1: xtm1 + 1,
+            outputs_info=[x0],
+            n_steps=10,
+            return_updates=False,
+        )
+        out = xs[1:][:, 1:][-1]
+
+        orig_fg = FunctionGraph(inputs=[x0], outputs=[out], clone=True)
+        rewr_fg = FunctionGraph(inputs=[x0], outputs=[out], clone=True)
+        in2out(scan_merge_subtensor_chain, ignore_newtrees=True).rewrite(rewr_fg)
+
+        # Confirm the rewrite triggered (would no-op without this fix because
+        # the only foldable chain on this graph carries an intermediate
+        # trailing slice).
+        assert not equal_computations(orig_fg.outputs, rewr_fg.outputs)
+
+        no_opt = Mode(linker="py", optimizer=None)
+        fn = function(rewr_fg.inputs, rewr_fg.outputs, mode=no_opt)
+        [result] = fn(np.zeros(3))
+        assert result.shape == (2,)
+        np.testing.assert_array_equal(result, np.full(2, 10.0))
+
     def test_save_mem_cannot_reduce_constant_number_of_steps(self):
         x0 = pt.scalar("x0")
         [xs, ys] = scan(
@@ -2181,7 +2215,7 @@ class TestSaveMem:
 
         np.testing.assert_equal(f(n_steps=1000, x0=[1, 1]), 55)
         np.testing.assert_equal(f(n_steps=1, x0=[1, 1]), 2)
-        with pytest.raises(AssertionError, match="n_steps > 0"):
+        with pytest.raises(AssertionError, match="n_steps >= 1"):
             f(n_steps=0, x0=[1, 1])
 
         # ys_trace is an Alloc that controls the size of the inner buffer,

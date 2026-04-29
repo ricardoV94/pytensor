@@ -11,10 +11,10 @@ from pytensor.graph.rewriting.basic import EquilibriumGraphRewriter, dfs_rewrite
 from pytensor.graph.rewriting.db import EquilibriumDB, SequenceDB
 from pytensor.scan.op import Scan
 from pytensor.scan.rewriting.buffer_reduction import (
+    scan_merge_subtensor_chain,
     scan_save_mem_no_prealloc,
     scan_save_mem_prealloc,
     scan_sit_sot_to_untraced,
-    while_scan_merge_subtensor_last_element,
 )
 from pytensor.scan.rewriting.inplace import ScanInplaceOptimizer
 from pytensor.scan.rewriting.input_output_cleanup import (
@@ -161,9 +161,9 @@ scan_seqopt1.register(
     position=6,
 )
 
-scan_eqopt2.register(
-    "while_scan_merge_subtensor_last_element",
-    dfs_rewriter(while_scan_merge_subtensor_last_element, ignore_newtrees=True),
+scan_eqopt1.register(
+    "scan_merge_subtensor_chain",
+    dfs_rewriter(scan_merge_subtensor_chain, ignore_newtrees=True),
     "fast_run",
     "scan",
 )
