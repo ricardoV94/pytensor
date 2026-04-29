@@ -6,6 +6,10 @@ needs:
 * :func:`scan_merge_subtensor_chain` — fold ``scan_out[init_l:]…[const_idx]``
   chains into a direct ``raw_out[final_idx]`` so ``scan_save_mem`` can see
   through nested constant-bound subtensors.
+* :func:`scan_reduce_nsteps` — when every client of a Scan output reads a
+  constant scalar index, shorten ``n_steps`` to the minimum that covers
+  those reads and rewrite each client to a negative index against the
+  trimmed trace.
 * :func:`scan_save_mem_rewrite` (registered as ``scan_save_mem_prealloc``
   / ``scan_save_mem_no_prealloc``) — shorten outer buffers and the
   ``n_steps`` to the smallest range any client actually reads.
@@ -17,16 +21,12 @@ import dataclasses
 from itertools import chain
 from typing import cast
 
-import numpy as np
-
 import pytensor.tensor as pt
 from pytensor.configdefaults import config
 from pytensor.graph.basic import Constant, Variable
-from pytensor.graph.fg import Output
 from pytensor.graph.rewriting.basic import copy_stack_trace, node_rewriter
 from pytensor.graph.traversal import apply_depends_on
 from pytensor.raise_op import Assert
-from pytensor.scalar import ScalarConstant
 from pytensor.scan.op import Scan
 from pytensor.scan.utils import expand_empty
 from pytensor.tensor.basic import (
@@ -34,44 +34,22 @@ from pytensor.tensor.basic import (
     atleast_Nd,
     get_scalar_constant_value,
 )
+from pytensor.tensor.basic import switch as pt_switch
 from pytensor.tensor.exceptions import NotScalarConstantError
-from pytensor.tensor.math import maximum, minimum
+from pytensor.tensor.math import ge, maximum, minimum
 from pytensor.tensor.rewriting.basic import broadcasted_by
+from pytensor.tensor.shape import Shape, Shape_i
 from pytensor.tensor.subtensor import (
     IncSubtensor,
     Subtensor,
     as_index_constant,
     basic_subtensor,
-    get_canonical_form_slice,
     get_idx_list,
 )
 from pytensor.tensor.variable import TensorVariable
 
 
-def select_min(x, y):
-    if x is None:
-        return y
-    if y is None:
-        return x
-    return minimum(x, y)
-
-
-def select_max(x, y):
-    if x is None:
-        return y
-    if y is None:
-        return x
-    return maximum(x, y)
-
-
-def sanitize(x):
-    if x is None:
-        return None
-    else:
-        return pt.as_tensor_variable(x)
-
-
-def _const_int_or_none(v):
+def _const_int_or_none(v) -> None | int:
     """Return v as a Python int if it's a constant scalar (None passes through)."""
     if v is None:
         return None
@@ -79,6 +57,37 @@ def _const_int_or_none(v):
         return int(get_scalar_constant_value(v, max_recur=4))
     except NotScalarConstantError:
         return None
+
+
+def _init_l_per_output(op_info) -> list[int]:
+    """Per-output strip length: ``abs(min(taps))`` for mit_sot/sit_sot, ``0``
+    for mit_mot and nit_sot."""
+    return (
+        [0] * op_info.n_mit_mot
+        + [
+            abs(min(v))
+            for v in chain(op_info.mit_sot_in_slices, op_info.sit_sot_in_slices)
+        ]
+        + [0] * op_info.n_nit_sot
+    )
+
+
+def _python_slice_from_idx(entry):
+    """Convert an idx_list entry into a pure-Python ``slice(int|None, ...)`` or
+    Python int. Returns ``None`` if any present component is non-constant.
+    """
+    if isinstance(entry, slice):
+        a = _const_int_or_none(entry.start)
+        b = _const_int_or_none(entry.stop)
+        s = _const_int_or_none(entry.step)
+        if entry.start is not None and a is None:
+            return None
+        if entry.stop is not None and b is None:
+            return None
+        if entry.step is not None and s is None:
+            return None
+        return slice(a, b, s)
+    return _const_int_or_none(entry)
 
 
 def _enumerate_subtensor_chains(fgraph, root):
@@ -92,25 +101,6 @@ def _enumerate_subtensor_chains(fgraph, root):
     for that step, to be replayed verbatim once the leading axis has been
     folded.
     """
-
-    def _python_slice_from_idx(entry):
-        """Convert an idx_list first-entry into a pure-Python slice / int.
-
-        Returns ``None`` if the entry has any non-constant component.
-        """
-        if isinstance(entry, slice):
-            a = _const_int_or_none(entry.start)
-            b = _const_int_or_none(entry.stop)
-            s = _const_int_or_none(entry.step)
-            if entry.start is not None and a is None:
-                return None
-            if entry.stop is not None and b is None:
-                return None
-            if entry.step is not None and s is None:
-                return None
-            return slice(a, b, s)
-        return _const_int_or_none(entry)
-
     stack = [(root, [], [])]
     while stack:
         var, prefix, trailings = stack.pop()
@@ -408,6 +398,426 @@ def _is_default_scan_buffer(final_buffer: TensorVariable, taps: int) -> bool:
         return not broadcasted_by(init_value_.squeeze(0), init_buffer[0])
 
 
+@node_rewriter([Scan])
+def scan_reduce_nsteps(fgraph, node):
+    """Reduce the number of scan iterations when clients don't need all steps.
+
+    Analyzes constant indices on scan outputs to find the minimum n_steps
+    needed. Adjusts client subtensors so negative indices are preserved,
+    enabling the downstream buffer reduction rewrite to reason about them.
+
+    Examples:
+        scan(n)[-2]    → scan(n-1)[-1]      (one fewer step)
+        scan(10)[7]    → scan(8)[-1]         (positive → negative)
+        scan(n)[-3:-1] → scan(n-1)[-2:None]  (slice adjustment)
+    """
+    op = node.op
+    op_info = op.info
+
+    # Can't reduce n_steps for while-scans or scans with untraced sit_sot
+    # outputs.
+    if op_info.as_while or op_info.n_untraced_sit_sot:
+        return None
+
+    c_outs = (
+        op_info.n_mit_mot + op_info.n_mit_sot + op_info.n_sit_sot + op_info.n_nit_sot
+    )
+    init_l = _init_l_per_output(op_info)
+
+    n_steps = node.inputs[0]
+    n_steps_const = _const_int_or_none(n_steps)
+
+    # Collect the maximum needed steps across all outputs and their clients.
+    # Negative-index requirements are tracked as ``offset = idx + 1`` (each
+    # ``<= 0``); if any equals 0 some client wants ``raw[-1]`` and we must
+    # bail. Tracking the constant offset directly avoids producing
+    # ``n_steps - minimum(n_steps, n_steps)`` style "no-op" deltas that
+    # ``scan_save_mem`` can't read through.
+    max_needed: int = 0  # max constant-position requirement (for non-negative idx)
+    neg_offsets: list[int] = []  # collected ``idx + 1`` over negative-idx clients
+    sym_constraints: list = []  # symbolic ``nw_steps_min`` contributions
+    can_reduce = True
+
+    for i, out in enumerate(node.outputs[:c_outs]):
+        for cl, _ in fgraph.clients[out]:
+            if not isinstance(cl.op, Subtensor):
+                can_reduce = False
+                break
+
+            s0 = get_idx_list(cl.inputs, cl.op.idx_list)[0]
+
+            if isinstance(s0, slice):
+                # Slice step != 1 (e.g. reverse) needs different bookkeeping.
+                if s0.step is not None and _const_int_or_none(s0.step) != 1:
+                    can_reduce = False
+                    break
+                # Open-ended [a:] or non-constant stop both fall here
+                # via ``_const_int_or_none`` returning None.
+                stop_int = _const_int_or_none(s0.stop)
+                if stop_int is None:
+                    can_reduce = False
+                    break
+                if stop_int < 0:
+                    # ``[a:-k]``: max raw position read = raw_length - k - 1,
+                    # so n_steps_min = n_steps - k. Track as offset = stop.
+                    neg_offsets.append(stop_int)
+                elif stop_int > 0:
+                    # ``[a:b]``: max raw position = b - 1, so n_steps_min
+                    # = b - init_l.
+                    max_needed = max(max_needed, stop_int - init_l[i])
+                # else: stop_int == 0: empty slice, contributes no constraint.
+            else:
+                if (idx_int := _const_int_or_none(s0)) is not None:
+                    if idx_int == -1:
+                        # ``raw[-1]`` reads the last computed step → all
+                        # iterations needed, can't reduce.
+                        can_reduce = False
+                        break
+                    if idx_int < 0:
+                        neg_offsets.append(idx_int + 1)
+                    else:
+                        max_needed = max(max_needed, idx_int + 1 - init_l[i])
+                else:
+                    # Symbolic scalar idx: contribute
+                    #   switch(s0 >= 0, s0 + 1 - init_l, n_steps + s0 + 1)
+                    # to the running maximum. Sign-cancellation makes the new
+                    # client idx collapse to ``-1`` in both branches when this
+                    # client drives the reduction (and is well-defined when it
+                    # doesn't). We can't bail on the symbolic ``raw[-1]`` case
+                    # statically; ``minimum`` below caps at ``n_steps``, making
+                    # the rewrite a no-op at runtime if it degenerates.
+                    sym_constraints.append(
+                        pt_switch(
+                            ge(s0, 0),
+                            s0 + (1 - init_l[i]),
+                            n_steps + s0 + 1,
+                        )
+                    )
+        if not can_reduce:
+            break
+
+    if not can_reduce:
+        return None
+
+    # Compute new n_steps: maximum over all collected contributions, capped
+    # at the original ``n_steps``.
+    contributions: list = []
+    if max_needed > 0:
+        contributions.append(max_needed)
+    if neg_offsets:
+        contributions.append(n_steps + max(neg_offsets))
+    contributions.extend(sym_constraints)
+    if not contributions:
+        return None
+
+    nw_steps: int | Variable = contributions[0]
+    for c in contributions[1:]:
+        nw_steps = maximum(nw_steps, c)
+    # Cap ``nw_steps`` at the user's ``n_steps`` whenever we can't prove the
+    # contributions stay below it. The all-positive-constants path (no
+    # ``sym_constraints``, no ``neg_offsets``) only skips the cap when
+    # ``n_steps`` itself is a known constant; otherwise an ``out[k]`` client
+    # would silently extend a symbolic ``n_steps`` past what the user
+    # requested.
+    if not isinstance(nw_steps, int) or sym_constraints or n_steps_const is None:
+        nw_steps = minimum(nw_steps, n_steps)
+
+    # Static reduction check (only the all-constant path can decide here;
+    # symbolic contributions are decided at runtime).
+    if (
+        isinstance(nw_steps, int)
+        and n_steps_const is not None
+        and nw_steps >= n_steps_const
+    ):
+        return None
+
+    # Build delta for index adjustment
+    delta = n_steps - nw_steps
+
+    # Create new scan with reduced n_steps
+    nw_inputs = list(node.inputs)
+    nw_inputs[0] = pt.as_tensor_variable(nw_steps)
+
+    # Shrink each recurrent (mit_sot/sit_sot) buffer to ``taps + nw_steps``
+    # to match the reduced n_steps. Default empty buffers are re-allocated;
+    # user-supplied buffers are sliced in place.
+    offset = 1 + op_info.n_seqs + op_info.n_mit_mot
+    for idx in range(op_info.n_mit_sot + op_info.n_sit_sot):
+        i = idx + op_info.n_mit_mot
+        taps = init_l[i]
+        nw_input = nw_inputs[offset + idx]
+        if _is_default_scan_buffer(nw_input, taps):
+            nw_input = expand_empty(nw_input.owner.inputs[1], nw_steps)
+        else:
+            nw_input = nw_input[: (taps + nw_steps)]
+        nw_inputs[offset + idx] = nw_input
+
+    # Shrink each nit_sot's scalar buffer-size input to ``nw_steps``
+    # (only when it was originally the scan's n_steps, i.e. "store all").
+    nitsot_offset = (
+        offset + op_info.n_mit_sot + op_info.n_sit_sot + op_info.n_untraced_sit_sot
+    )
+    for idx in range(op_info.n_nit_sot):
+        pos = nitsot_offset + idx
+        if nw_inputs[pos] == n_steps:
+            nw_inputs[pos] = pt.as_tensor_variable(nw_steps)
+
+    new_outs = cast(list[TensorVariable], op(*nw_inputs, return_list=True))
+
+    # Adjust client subtensors
+    old_new = []
+    for i, out in enumerate(node.outputs[:c_outs]):
+        old_raw_length = node.inputs[0] + init_l[i]  # symbolic in old n_steps
+        new_length = nw_steps + init_l[i]
+        for cl, _ in fgraph.clients[out]:
+            if not isinstance(cl.op, Subtensor):
+                continue
+            this_slice = get_idx_list(cl.inputs, cl.op.idx_list)
+            s0 = this_slice[0]
+            rest = this_slice[1:]
+
+            if isinstance(s0, slice):
+                # Slice bounds: a negative ``b`` semantically refers to
+                # position ``old_raw_length + b``. Pin each negative bound
+                # to that absolute position so the slice still selects the
+                # same elements against the shorter ``new_outs[i]``;
+                # ``None`` and non-negative bounds carry over unchanged.
+                def _maybe_to_positive(b):
+                    if b is None:
+                        return None
+                    b_int = _const_int_or_none(b)
+                    if b_int is not None and b_int < 0:
+                        return old_raw_length + b
+                    return b
+
+                new_s0 = slice(
+                    _maybe_to_positive(s0.start),
+                    _maybe_to_positive(s0.stop),
+                    s0.step,
+                )
+            else:
+                # Scalar idx: rewrite against the shorter ``new_outs[i]``
+                # while pointing at the same absolute element.
+                #   positive k → ``k - new_length`` (negative form so
+                #     save_mem can act on it).
+                #   negative -j → ``-j + delta`` (where delta =
+                #     old_n_steps - nw_steps; same absolute position).
+                # Symbolic idx picks the branch via switch; when this
+                # client drives the reduction the formula collapses to -1.
+                idx_int = _const_int_or_none(s0)
+                if idx_int is None:
+                    new_s0 = pt_switch(ge(s0, 0), s0 - new_length, s0 + delta)
+                elif idx_int >= 0:
+                    new_s0 = s0 - new_length
+                else:
+                    new_s0 = s0 + delta
+            nw_slice = (
+                as_index_constant(new_s0),
+                *(as_index_constant(s) for s in rest),
+            )
+
+            new_o = basic_subtensor(new_outs[i], *nw_slice)
+            old_new.append((cl.outputs[0], new_o))
+
+    if not old_new:
+        return None
+
+    # Check the new outputs don't depend on the old scan node
+    if any(apply_depends_on(new.owner, node) for _, new in old_new):
+        return False
+
+    replacements = dict(old_new)
+    replacements["remove"] = [node]
+    return replacements
+
+
+def _strip_chain_negative_start(cl, init_l_i, raw_length_const, fgraph):
+    """Recognize ``out[init_l:][-k:]`` (initial-state strip + tail slice).
+
+    ``out[init_l:]`` is the slice scan inserts internally so the user sees
+    ``xs`` (the computed-only steps) rather than the raw buffer with the
+    initial state prepended.
+
+    Why scan_save_mem rather than scan_merge_subtensor_chain: pre-folding
+    to a static ``out[-k:]`` would change semantics — when ``n_steps < k``
+    the original chain clamps to ``n_steps`` elements, but ``out[-k:]``
+    against the original buffer always returns ``k``.
+    The semantics-preserving rewrite is the dynamic
+    ``trimmed_out[len - minimum(k, n_steps):]`` against the *trimmed* buffer,
+    whose length only exists once ``scan_save_mem`` has decided to trim —
+    so recognition has to ride along with the buffer-reduction rebuild.
+
+    Two shapes match:
+
+    * **Un-merged chain** ``out[l:][-k:]`` (typical when ``n_steps`` is
+      symbolic): the strip ``out[l:]`` survived ``local_subtensor_merge_slice``
+      because it can't fold without shape info. The save_mem rebuild
+      collapses this by replacing the *inner* ``[-k:]`` Subtensor's output
+      with ``trimmed_out[len - minimum(k, n_steps):]``. The dynamic slice
+      handles the ``n_steps < k`` regime (returns just ``n_steps`` elements
+      via clamping at runtime).
+    * **Merged single Subtensor** ``out[a:L]`` where ``L`` equals ``out``'s
+      static length. When ``n_steps`` is constant, ``local_subtensor_merge_slice``
+      flattens ``out[init_l:][-k:]`` to this form (e.g. ``init_l=2``,
+      ``n_steps=5`` → ``L=7``; user-written ``out[2:][-3:]`` becomes
+      ``out[4:7]``). ``get_canonical_form_slice`` normalizes ``stop=None``
+      to the concrete length, hiding the original ``-k``. We recover
+      ``-k = a - L`` and rewrite to ``out[a-L:]`` (here ``out[-3:]``) so
+      save_mem's buffer-trim logic picks it up.
+
+    Returns ``(effective_negative_start, replace_slice, inner_cl_or_None)``
+    or ``(None, None, None)``.
+
+    * ``effective_negative_start`` is the recovered ``-k`` (a negative int).
+      The caller turns it into the buffer size to keep via
+      ``needed = abs(effective_negative_start)``.
+    * ``replace_slice`` (merged shape only) is the rewritten slice
+      ``(slice(-k, None, None),)`` — substituted into ``slices[i][k_cl]``
+      so the rebuild emits the negative-start form. ``None`` for the
+      un-merged shape.
+    * ``inner_cl`` (un-merged shape only) is the deeper ``[-k:]`` Subtensor
+      node; the rebuild replaces its output with the dynamic
+      ``trimmed_out[len - minimum(k, n_steps):]``, orphaning the outer
+      strip (DCE'd). ``None`` for the merged shape.
+    """
+    null = (None, None, None)
+
+    match cl.op:
+        case Subtensor(idx_list=(slice(),)):
+            pass
+        case _:
+            # TODO: We could handle cl.op.idx_list > 1, trailing slices don't matter for save mem
+            return null
+
+    [outer_slice] = get_idx_list(cl.inputs, cl.op.idx_list)
+    outer_slice = _python_slice_from_idx(outer_slice)
+    if outer_slice is None or outer_slice.step not in (None, 1):
+        return null
+    start_const = 0 if outer_slice.start is None else outer_slice.start
+    stop_const = outer_slice.stop  # int or None
+
+    # Un-merged shape: ``cl`` is the strip ``[init_l:]`` (or ``[0:]`` on
+    # nit_sot); the deeper client must be ``[-k:]``.
+    if start_const in (0, init_l_i) and stop_const is None:
+        inner_clients = fgraph.clients.get(cl.outputs[0], [])
+        if len(inner_clients) != 1:
+            return null
+        [(inner_cl, _)] = inner_clients
+        match inner_cl.op:
+            case Subtensor(idx_list=(slice(),)):
+                pass
+            case _:
+                return null
+
+        [inner_slice] = get_idx_list(inner_cl.inputs, inner_cl.op.idx_list)
+        inner_slice = _python_slice_from_idx(inner_slice)
+        if (
+            inner_slice is None
+            or inner_slice.step not in (None, 1)
+            or inner_slice.stop is not None
+            or inner_slice.start is None
+            or inner_slice.start >= 0
+        ):
+            return null
+        return inner_slice.start, None, inner_cl
+
+    # Merged shape: single ``out[a:L]`` with ``a > init_l``, equivalent to
+    # ``out[a-L:]`` (negative start).
+    if (
+        raw_length_const is not None
+        and start_const > init_l_i
+        and stop_const == raw_length_const
+    ):
+        translated = start_const - raw_length_const  # negative
+        return translated, (slice(translated, None, None),), None
+
+    return null
+
+
+def _translate_positive_to_negative(s0, raw_length_const, init_l_i):
+    """Translate a constant positive-form client into negative-form.
+
+    When the raw buffer length is a known constant ``raw_length_const`` we can
+    rewrite a positive-form client into the negative form ``scan_save_mem``
+    already understands, exposing buffer trims it would otherwise miss
+    (e.g. ``out0[k]`` and ``out1[k:]`` siblings on a multi-output scan whose
+    ``n_steps`` is symbolic — ``scan_reduce_nsteps`` bails for the open-ended
+    sibling, so positive-form recognition has to live here).
+
+    Recognized shapes:
+
+    * scalar ``out[k]`` with ``0 < k < raw_length_const`` → ``k - raw_length_const``.
+    * open-ended ``out[k:]`` with ``init_l_i < k < raw_length_const``,
+      step ∈ {None, 1} → ``slice(k - raw_length_const, None, None)``.
+    * bounded ``out[k:m]`` with ``init_l_i < k < m <= raw_length_const``,
+      step ∈ {None, 1} → ``slice(k - raw_length_const, m - raw_length_const,
+      None)``, collapsing the stop to ``None`` when ``m == raw_length_const``
+      (mirrors ``_strip_chain_negative_start``'s merged-shape recovery).
+
+    Returns ``(new_first_axis, needed)`` on success and ``None`` otherwise.
+    The caller splices ``new_first_axis`` into ``slices[i][k_cl]``'s leading
+    dim (preserving any trailing axes) and uses ``needed = raw_length_const
+    - k`` as the buffer size to keep.
+
+    The strict ``k > 0`` (scalar) / ``k > init_l_i`` (slice) gates ensure
+    ``needed < raw_length_const`` so the rewrite is non-trivial; without
+    them a translated ``out[0]`` / ``out[init_l:]`` would yield no trim and
+    the rewrite would re-fire on its own output.
+    """
+    if isinstance(s0, slice):
+        step = _const_int_or_none(s0.step)
+        if s0.step is not None and step != 1:
+            return None
+        start = _const_int_or_none(s0.start)
+        if start is None or not (init_l_i < start < raw_length_const):
+            return None
+        stop = _const_int_or_none(s0.stop)
+        if stop is None or stop == raw_length_const:
+            new_stop = None
+        elif start < stop < raw_length_const:
+            new_stop = stop - raw_length_const  # negative
+        else:
+            return None
+        return slice(start - raw_length_const, new_stop, None), raw_length_const - start
+
+    k = _const_int_or_none(s0)
+    if k is None or not (0 < k < raw_length_const):
+        return None
+    return k - raw_length_const, raw_length_const - k
+
+
+def _n_steps_static_min(n_steps) -> int | None:
+    """Largest statically-known lower bound on ``n_steps``, or ``None`` if no
+    static info is available.
+
+    Covers the constant case and the common shape-of-input cases where the
+    source tensor's static type shape pins the dim length.
+    """
+    if (n_const := _const_int_or_none(n_steps)) is not None:
+        return n_const
+
+    match n_steps.owner_op_and_inputs:
+        case Shape_i(i=dim), src:
+            pass
+        case Subtensor(idx_list=(0,)), inner, dim_symbolic:
+            match inner.owner_op_and_inputs:
+                case Shape(), src:
+                    dim = _const_int_or_none(dim_symbolic)
+                    if dim is None:
+                        return None
+                case _:
+                    return None
+        case _:
+            return None
+
+    try:
+        static_dim: int | None = src.type.shape[dim]
+    except IndexError:
+        return None  # out of bounds index
+
+    return static_dim
+
+
 def scan_save_mem_rewrite(fgraph, node, backend_supports_output_pre_allocation: bool):
     r"""Graph optimizer that reduces scan memory consumption.
 
@@ -455,13 +865,6 @@ def scan_save_mem_rewrite(fgraph, node, backend_supports_output_pre_allocation: 
         position in the outer circular buffer. This would invalidate results,
         if the input is still needed for some other output computation.
     """
-    if hasattr(fgraph, "shape_feature"):
-        shape_of = fgraph.shape_feature.shape_of
-    else:
-        # Each access to shape_of is in a try..except block in order to
-        # use a default version when the variable is not in the shape_of
-        # dictionary.
-        shape_of = {}
     # 1. Initialization of variables
     # Note 1) We do not actually care about outputs representing shared
     # variables (those have no intermediate values) so it is safer to
@@ -477,239 +880,137 @@ def scan_save_mem_rewrite(fgraph, node, backend_supports_output_pre_allocation: 
         op_info.n_mit_mot + op_info.n_mit_sot + op_info.n_sit_sot + op_info.n_nit_sot
     )
 
-    init_l = [0 for x in range(op_info.n_mit_mot)]
-    init_l += [
-        abs(min(v)) for v in chain(op_info.mit_sot_in_slices, op_info.sit_sot_in_slices)
-    ]
-    init_l += [0 for x in range(op_info.n_nit_sot)]
-    # 2. Check the clients of each output and see for how many steps
-    # does scan need to run
+    init_l = _init_l_per_output(op_info)
 
-    # This comparison checks if there is any uncounted output, which
-    # can only be an output corresponding to a shared variable
-
-    # 2.1 Initialize
-    # global_nsteps is a dictionary having two fields ( 'real' deals
-    # with int values, 'sym' with symbolic ones) or None
-    # given that a scan op has k outputs o_1, .. o_k and each
-    # output has n_j clients c_1^1, c_1^2, .. c_1^{n_1}, c_2^1, ..,
-    # global_nsteps is None if any of the clients is different
-    # from a subtensor or its real and sym field equal to
-    # max(c_i_j.idx_list[0].stop), meaning store up to which maximal
-    # index(step) for any output scan actually needs to compute
-    # In other words n_steps should be equal to this maximal !
-    # Note: if we have a shared variable that gets updated at every step
-    # of the loop, reducing the number of steps will affect the
-    # value of the shared variable after the loop so we cannot
-    # change the number of steps in that case. To do this we set
-    # global_nsteps to None which is seen as a flag that nothing needs
-    # to be done.
-    # Note: For simplicity while Scans also have global_nsteps set to None.
-    #  All step optimizations require knowing the shape of the output, which
-    #  cannot be determined from the inputs alone.
-    global_nsteps: None | dict
+    # Constant raw length per output (init_l + n_steps), or None if symbolic.
+    n_steps = node.inputs[0]
+    n_steps_const = _const_int_or_none(n_steps)
+    raw_length_consts = (
+        [il + n_steps_const for il in init_l]
+        if isinstance(n_steps_const, int)
+        else [None] * len(init_l)
+    )
+    # Per-output rebuild redirects for un-merged ``out[init_l:][-k:]`` chains
+    # (recognised by ``_strip_chain_negative_start``):
+    #   {client_index: (inner_cl_node, k_const)}.
+    # At rebuild time we replace ``inner_cl.outputs[0]`` (the deeper
+    # ``[-k:]``) with a slice on the trimmed buffer; the outer strip is left
+    # orphaned (DCE'd).
+    client_redirects: list[dict] = [{} for _ in node.outputs]
+    # 2. Check the clients of each output and see for how many steps scan
+    # needs to run.
     assert len(node.outputs) >= c_outs
-    if len(node.outputs) == c_outs and not op.info.as_while:
-        global_nsteps = {"real": -1, "sym": []}
-    else:
-        global_nsteps = None
 
-    # Keeps track of the original slices that each client represent
-    slices: list[None | list] = [None for o in node.outputs]
-
-    # For each output: how many intermediate values to store.
-    # 0 means keep all (required for mit_mot and shared outputs);
-    # -1 is a "no decision" sentinel flipped to 0 after the trimming loop.
-    store_steps = [0 for o in range(op_info.n_mit_mot)]
-    store_steps += [-1 for o in node.outputs[op_info.n_mit_mot : c_outs]]
-    # Flag that says if an input has changed and we need to do something
-    # or not
-    flag_store = False
-
-    # 2.2 Loop over the clients to figure out how many steps we actually need to do in the Scan
-    for i, out in enumerate(node.outputs[:c_outs]):
-        # look at all its clients
-        slices[i] = []
-        for cl, _ in fgraph.clients[out]:
-            # 2.1 outputs of the function
-            # => output needs all its intermediate values
-            if isinstance(cl.op, Output):
-                # if the node is actually an output, then
-                # we need to store the entire thing
-                global_nsteps = None
-                slices[i] = None
-                break
-            # 2.2 non-subtensor nodes
-            # => output needs all its intermediate values
-            elif not isinstance(cl.op, Subtensor):
-                global_nsteps = None
-                slices[i] = None
-                break
-            # 2.3 subtensor nodes
-            # => output might need to store just a subset of its values
-            else:
-                # 2.3.1 extract idx list of subtensor
-                this_slice = get_idx_list(cl.inputs, cl.op.idx_list)
-
-                # 2.3.2 extract the begin/end of the first dimension
-                if i >= op_info.n_mit_mot:
-                    try:
-                        length = shape_of[out][0]
-                    except KeyError:
-                        length = node.inputs[0] + init_l[i]
-                else:
-                    try:
-                        length = shape_of[out][0]
-                    except KeyError:
-                        length = out.shape[0]
-                cf_slice = get_canonical_form_slice(this_slice[0], length)
-                slices[i] += [(cf_slice, this_slice)]  # type: ignore
-
-                if isinstance(this_slice[0], slice) and this_slice[0].stop is None:
-                    global_nsteps = None
-                if isinstance(cf_slice[0], slice):
-                    stop = get_scalar_constant_value(
-                        cf_slice[0].stop, raise_not_constant=False
-                    )
-                else:
-                    stop = (
-                        get_scalar_constant_value(cf_slice[0], raise_not_constant=False)
-                        + 1
-                    )
-                if stop == get_scalar_constant_value(length, raise_not_constant=False):
-                    stop = None
-                    global_nsteps = None
-                else:
-                    # there is a **gotcha** here ! Namely, scan returns an
-                    # array that contains the initial state of the output
-                    # as well. Which means that if y has an initial state of
-                    # length 3, and you look for 5 steps you get an output
-                    # y of length 8. If you only use y[:5], this does not
-                    # mean that you only need to loop for 5 steps but
-                    # actually only for 2 steps ( the first 3 are the
-                    # initial state)
-                    stop = stop - init_l[i]
-
-                # 2.3.3 we might get away with fewer steps
-                if stop is not None and global_nsteps is not None:
-                    # yes if it is a tensor
-                    if isinstance(stop, Variable):
-                        global_nsteps["sym"] += [stop]
-                    elif isinstance(stop, int | np.integer):
-                        global_nsteps["real"] = max(global_nsteps["real"], stop)
-                    else:
-                        global_nsteps = None
-
-    # 2.3. Analyze global_nsteps to figure out for how many steps scan
-    # needs to iterate
-    if global_nsteps is None:
-        nw_steps = node.inputs[0]
-    else:
-        # there are some symbolic tensors that limit the number of
-        # steps
-        if len(global_nsteps["sym"]) == 0:
-            sym_steps = None
-        else:
-            sym_steps = global_nsteps["sym"][0]
-            for c in global_nsteps["sym"][1:]:
-                sym_steps = maximum(sym_steps, c)
-
-        if global_nsteps["real"] >= 0:
-            real_steps = global_nsteps["real"]
-        else:
-            real_steps = None
-        nw_steps = select_min(select_max(sym_steps, real_steps), node.inputs[0])
-
-    # 2.4 Loop over the clients again now looking just to see how many
-    # intermediate steps to store. Skip mit_mot outputs as their
-    # store_steps is always 0 (all intermediate values are needed).
-    for i, out in enumerate(
-        node.outputs[op_info.n_mit_mot : c_outs], start=op_info.n_mit_mot
-    ):
-        # look at all its clients
-        for cl, _ in fgraph.clients[out]:
-            if isinstance(cl.op, Output):
-                store_steps[i] = 0
-                break
-            elif not isinstance(cl.op, Subtensor):
-                store_steps[i] = 0
-                break
-            else:
-                this_slice = get_idx_list(cl.inputs, cl.op.idx_list)
-
-                if isinstance(this_slice[0], slice):
-                    start = this_slice[0].start
-                    if isinstance(start, Constant):
-                        start = start.data
-                    # Don't do anything if the subtensor is starting from the beginning of the buffer
-                    # Or just skipping the initial values (default output returned to the user).
-                    # Trimming the initial values would require a roll to align the buffer once scan is done
-                    # As it always starts writing at position [0+max(taps)], and ends up at position [:max(taps)]
-                    # It's cheaper to just keep the initial values in the buffer and slice them away (default output)
-                    if start in (0, None, init_l[i]):
-                        store_steps[i] = 0
-                        break
-
-                length = node.inputs[0] + init_l[i]
-                cf_slice = get_canonical_form_slice(this_slice[0], length)
-
-                if isinstance(cf_slice[0], slice):
-                    start = pt.get_scalar_constant_value(
-                        cf_slice[0].start, raise_not_constant=False
-                    )
-                else:
-                    start = pt.get_scalar_constant_value(
-                        cf_slice[0], raise_not_constant=False
-                    )
-
-                if start == 0 or store_steps[i] == 0:
-                    store_steps[i] = 0
-                else:
-                    # The "+ 1" is because of the memory pre-allocation
-                    # mechanism used to in the Scan op to reduce overhead.
-                    # To prevent aliasing between the inputs and outputs
-                    # of recurrent states, it requires that the buffer be
-                    # large enough to that, the new state and the oldest
-                    # tap needed don't occupy the sample place in the
-                    # circular buffer. For now, this only needs to be done
-                    # for mitsots and sitsots (because mitmots are not
-                    # currently supported by the mechanism) and only if
-                    # the pre-allocation mechanism is activated.
-                    prealloc_outs = (
-                        backend_supports_output_pre_allocation
-                        and config.scan__allow_output_prealloc
-                    )
-
-                    first_mitsot_idx = op_info.n_mit_mot
-                    last_sitsot_idx = (
-                        op_info.n_mit_mot + op_info.n_mit_sot + op_info.n_sit_sot - 1
-                    )
-                    preallocable_output = first_mitsot_idx <= i <= last_sitsot_idx
-
-                    if prealloc_outs and preallocable_output:
-                        # TODO: If there's only one output or other outputs do not depend
-                        #  on the same input, we could reduce the buffer size to the minimum
-                        # The extra entry to prevent aliasing between the new
-                        # state and the oldest tap is only needed when the
-                        # scan actually runs (nw_steps >= 1).
-                        pval = select_max(
-                            nw_steps - start + init_l[i],
-                            init_l[i] + minimum(nw_steps, 1),
-                        )
-                    else:
-                        pval = select_max(nw_steps - start + init_l[i], init_l[i])
-
-                    if store_steps[i] != -1:
-                        pval = select_max(pval, store_steps[i])
-
-                    store_steps[i] = pval
-                    flag_store = True
-
-    # A clientless mit_sot / sit_sot may still be read by the inner
-    # recurrence; keep the minimum its taps need (plus one slot under prealloc).
     prealloc_outs = (
         backend_supports_output_pre_allocation and config.scan__allow_output_prealloc
     )
+    last_sitsot_idx = op_info.n_mit_mot + op_info.n_mit_sot + op_info.n_sit_sot - 1
+
+    # ``slices[i]`` records the per-client idx_list for each output, or None
+    # if any client isn't a Subtensor (then the buffer can't be trimmed).
+    # Used at rebuild time to redirect each client to the new (smaller)
+    # output.
+    slices: list[None | list] = [None] * len(node.outputs)
+    # ``store_steps[i]`` is the buffer size to keep for output ``i``. ``0``
+    # means "keep all" (mandatory for mit_mot and shared); ``-1`` is a
+    # "no decision" sentinel flipped at the end.
+    store_steps = [0] * op_info.n_mit_mot + [-1] * (c_outs - op_info.n_mit_mot)
+    flag_store = False
+
+    # Single pass over each non-mit_mot output's clients: collect slices and
+    # decide store_steps together. mit_mot outputs always need full storage,
+    # so we skip them entirely.
+    for i, out in enumerate(
+        node.outputs[op_info.n_mit_mot : c_outs], start=op_info.n_mit_mot
+    ):
+        slices[i] = []
+        for k_cl, (cl, _) in enumerate(fgraph.clients[out]):
+            if not isinstance(cl.op, Subtensor):
+                # ``Output`` or any other consumer → can't trim this output.
+                slices[i] = None
+                store_steps[i] = 0
+                break
+
+            this_slice = get_idx_list(cl.inputs, cl.op.idx_list)
+            slices[i].append(this_slice)  # type: ignore[union-attr]
+            s0 = this_slice[0]
+
+            # Recognize the strip + ``[-k:]`` chain (or its merged ``[a:L]`` equivalent).
+            # Translate to a negative-start slice so the buffer-trim logic below picks it up.
+            neg_start, replace, inner_cl = _strip_chain_negative_start(
+                cl, init_l[i], raw_length_consts[i], fgraph
+            )
+            if neg_start is not None:
+                needed = abs(neg_start)
+                if replace is not None:
+                    # Merged form ``out[a:L]``: rewrite the recorded slice
+                    # in place so the rebuild emits the negative-start form.
+                    slices[i][k_cl] = replace  # type: ignore[index]
+                if inner_cl is not None:
+                    # Un-merged chain ``out[init_l:][-k:]``: defer to a
+                    # rebuild-time redirect that replaces the *inner*
+                    # ``[-k:]`` Subtensor's output with a dynamic slice on
+                    # the trimmed buffer.
+                    client_redirects[i][k_cl] = (inner_cl, needed)
+            elif (
+                raw_length_consts[i] is not None
+                and (
+                    translated := _translate_positive_to_negative(
+                        s0, raw_length_consts[i], init_l[i]
+                    )
+                )
+                is not None
+            ):
+                # Constant raw length lets us translate a positive-form
+                # client (``out[k]``, ``out[k:]``, ``out[k:m]``) into the
+                # negative-form the existing trim logic expects. Splice the
+                # leading axis only; trailing axes ride along verbatim.
+                new_first, needed = translated
+                slices[i][k_cl] = (new_first, *this_slice[1:])  # type: ignore[index]
+            elif isinstance(s0, slice):
+                start = s0.start
+                if isinstance(start, Constant):
+                    start = start.data
+                # ``[:]``, ``[0:]`` and ``[init_l:]`` access the buffer
+                # from its natural start; trimming would require a roll
+                # to realign the circular buffer, more expensive than
+                # keeping everything.
+                if start in (0, None, init_l[i]):
+                    store_steps[i] = 0
+                    break
+                # Only forward ``[-k:...]`` has an obvious buffer-size
+                # answer (``k``). Reverse / non-positive steps walk back
+                # to index 0 and would need the full buffer.
+                s_step = _const_int_or_none(s0.step)
+                forward = s0.step is None or (s_step is not None and s_step > 0)
+                s_start = _const_int_or_none(s0.start)
+                needed = (
+                    abs(s_start)
+                    if forward and s_start is not None and s_start < 0
+                    else None
+                )
+            else:
+                idx = _const_int_or_none(s0)
+                needed = abs(idx) if (idx is not None and idx < 0) else None
+
+            if needed is None:
+                store_steps[i] = 0
+                break
+
+            preallocable = op_info.n_mit_mot <= i <= last_sitsot_idx
+            needed = max(needed, init_l[i])
+            pval = (
+                max(needed, init_l[i] + 1)
+                if (prealloc_outs and preallocable)
+                else needed
+            )
+            if store_steps[i] != -1:
+                pval = max(pval, store_steps[i])
+            store_steps[i] = pval
+            flag_store = True
+
+    # A clientless mit_sot / sit_sot may still be read by the inner
+    # recurrence; keep the minimum its taps need (plus one slot under prealloc).
     for i in range(
         op_info.n_mit_mot,
         op_info.n_mit_mot + op_info.n_mit_sot + op_info.n_sit_sot,
@@ -722,11 +1023,14 @@ def scan_save_mem_rewrite(fgraph, node, backend_supports_output_pre_allocation: 
     store_steps = [0 if x == -1 else x for x in store_steps]
 
     # 3. is there anything to change ?
-    if flag_store or global_nsteps is not None:
+    if flag_store:
         # 3.1 initialize inputs for the new scan
         old_outputs = []
         nw_inputs = list(node.inputs)
-        nw_inputs[0] = nw_steps
+
+        # Precompute the static lower bound on ``n_steps`` once
+        # the buffer rebuild loop below uses it to decide whether each prealloc cap is statically a no-op.
+        n_steps_static_min = _n_steps_static_min(n_steps)
 
         # 3.2. compose replace pairs for those nodes that need not store everything in memory
         replaced_outs = []
@@ -743,6 +1047,15 @@ def scan_save_mem_rewrite(fgraph, node, backend_supports_output_pre_allocation: 
                     # Recreate default buffers with new size
                     if _is_default_scan_buffer(nw_input, taps):
                         extra_size = val - taps
+                        # Cap prealloc extra entries at n_steps to avoid uninitialized slots
+                        # when n_steps < extra_size (#1878). Skip the symbolic ``minimum``
+                        # when we can prove it's not needed
+                        cap_provable = (
+                            n_steps_static_min is not None
+                            and n_steps_static_min >= extra_size
+                        )
+                        if extra_size > 0 and not cap_provable:
+                            extra_size = minimum(extra_size, n_steps)
                         nw_input = expand_empty(nw_input.owner.inputs[1], extra_size)
                     # Otherwise, just trim with a slice
                     else:
@@ -750,16 +1063,6 @@ def scan_save_mem_rewrite(fgraph, node, backend_supports_output_pre_allocation: 
 
                     nw_inputs[offset + idx] = nw_input
                     replaced_outs.append(op_info.n_mit_mot + idx)
-                    odx = op_info.n_mit_mot + idx
-                    old_outputs += [
-                        (
-                            odx,
-                            [
-                                x[0].outputs[0]
-                                for x in fgraph.clients[node.outputs[odx]]
-                            ],
-                        )
-                    ]
                 # If there is no memory pre-allocated for this output
                 elif idx < op_info.n_mit_sot + op_info.n_sit_sot + op_info.n_nit_sot:
                     pos = (
@@ -770,120 +1073,61 @@ def scan_save_mem_rewrite(fgraph, node, backend_supports_output_pre_allocation: 
                         + op_info.n_untraced_sit_sot
                     )
                     if nw_inputs[pos] == node.inputs[0]:
-                        nw_inputs[pos] = val
-                    odx = op_info.n_mit_mot + idx
-                    replaced_outs.append(odx)
-                    old_outputs += [
-                        (
-                            odx,
-                            [
-                                x[0].outputs[0]
-                                for x in fgraph.clients[node.outputs[odx]]
-                            ],
-                        )
-                    ]
-        # 3.3. Recompute inputs for everything else based on the new number of steps
-        if global_nsteps is not None:
-            for idx, val in enumerate(store_steps[op_info.n_mit_mot :]):
-                if val == 0:
-                    # val == 0 means that we want to keep all intermediate
-                    # results for that state, including the initial values.
-                    if idx < op_info.n_mit_sot + op_info.n_sit_sot:
-                        taps = init_l[op_info.n_mit_mot + idx]
-                        in_idx = offset + idx
-                        nw_input = nw_inputs[in_idx]
-                        if _is_default_scan_buffer(nw_input, taps):
-                            nw_input = expand_empty(nw_input.owner.inputs[1], nw_steps)
-                        else:
-                            nw_input = nw_input[: (taps + nw_steps)]
-                        nw_inputs[in_idx] = nw_input
+                        nw_inputs[pos] = pt.as_tensor_variable(val)
+                    replaced_outs.append(op_info.n_mit_mot + idx)
+                else:
+                    continue
 
-                    elif (
-                        idx < op_info.n_mit_sot + op_info.n_sit_sot + op_info.n_nit_sot
-                    ):
-                        in_idx = offset + idx + op_info.n_untraced_sit_sot
-                        if nw_inputs[in_idx] == node.inputs[0]:
-                            nw_inputs[in_idx] = nw_steps
-
-        # 3.4. Recreate the same scan with new outer inputs.
-        new_outs = cast(list[TensorVariable], op(*nw_inputs, return_list=True))
+                # Record the targets to rewire after the rebuild. For
+                # redirected clients (un-merged ``[-k:]`` chain) the target
+                # is the deeper ``[-k:]`` Subtensor's output and the strip is
+                # then orphaned; for everything else it's the client's
+                # output directly.
+                odx = op_info.n_mit_mot + idx
+                old_outputs.append(
+                    (
+                        odx,
+                        [
+                            (
+                                client_redirects[odx][k][0]
+                                if k in client_redirects[odx]
+                                else cl
+                            ).outputs[0]
+                            for k, (cl, _) in enumerate(
+                                fgraph.clients[node.outputs[odx]]
+                            )
+                        ],
+                    )
+                )
+        # 3.3. Recreate the same scan with new outer inputs.
+        new_outs = op(*nw_inputs, return_list=True)
 
         old_new = []
-        # 3.5 Get replace pairs for those outputs that do not change
-        # the number of intermediate steps stored
-        for idx, sl in enumerate(slices):
-            if global_nsteps and sl is not None and store_steps[idx] == 0:
-                for hdx, cl in enumerate(fgraph.clients[node.outputs[idx]]):
-                    cnf_slice, old_slices = sl[hdx]
-                    # Sanitize the nw_slice by converting ints back into
-                    # constants :) I only need to do this for the first
-                    # slice since that is the only slice
-
-                    if isinstance(cnf_slice[0], slice):
-                        fslice = slice(
-                            sanitize(cnf_slice[0].start),
-                            sanitize(cnf_slice[0].stop),
-                            sanitize(cnf_slice[0].step),
-                        )
-                    else:
-                        fslice = sanitize(cnf_slice[0])
-
-                    new_o = basic_subtensor(new_outs[idx], fslice, *old_slices[1:])
-                    if new_o.ndim > 0:
-                        new_o = new_o[:: cnf_slice[1]]
-                    replaced_outs.append(idx)
-                    old_new += [(cl[0].outputs[0], new_o)]
-        # 3.6. Get replace pairs for those outputs that change
-        # the number of stored intermediate steps
+        # 3.4. Get replace pairs for outputs with reduced buffers.
+        # Negative indices are preserved as-is since n_steps is unchanged
+        # and the circular buffer correctly maps them.
+        n_steps = node.inputs[0]
         for pos, old_outs in old_outputs:
-            if len(old_outs) > 0:
-                for k, old in enumerate(old_outs):
-                    # Get the correct slice
-                    cnf_slice, old_slices = slices[pos][k]
-                    if isinstance(cnf_slice[0], slice):
-                        start = (
-                            cnf_slice[0].start
-                            - nw_steps
-                            - init_l[pos]
-                            + store_steps[pos]
-                        )
-                        if cnf_slice[0].stop is not None:
-                            stop = (
-                                cnf_slice[0].stop
-                                - nw_steps
-                                - init_l[pos]
-                                + store_steps[pos]
-                            )
-                        else:
-                            stop = None
-                        nw_slice = (
-                            slice(
-                                sanitize(start),
-                                sanitize(stop),
-                                sanitize(cnf_slice[0].step),
-                            ),
-                            *old_slices[1:],
-                        )
-
+            new_raw = new_outs[pos]
+            for k, old in enumerate(old_outs):
+                if k in client_redirects[pos]:
+                    # Redirect rebuild for ``scan_out[init_l:][-k:]``: point
+                    # the user's ``xs[-k:]`` at the last ``min(k, n_steps)``
+                    # elements of the *trimmed* buffer. Use a clean Python
+                    # negative slice when the cap is provably a no-op,
+                    # otherwise compute the start in positive form (avoids
+                    # the switch/min/max tree ``get_canonical_form_slice``
+                    # would emit for a negative Variable start).
+                    _, k_const = client_redirects[pos][k]
+                    if n_steps_static_min is not None and n_steps_static_min >= k_const:
+                        new_o = new_raw[-k_const:]
                     else:
-                        # Special case when only last value is requested
-                        if (
-                            isinstance(old_slices[0], ScalarConstant)
-                            and old_slices[0].value == -1
-                        ):
-                            position = old_slices[0]
-                        else:
-                            position = (
-                                cnf_slice[0] - nw_steps - init_l[pos] + store_steps[pos]
-                            )
+                        new_o = new_raw[new_raw.shape[0] - minimum(k_const, n_steps) :]
+                else:
+                    new_o = new_raw[tuple(slices[pos][k])]
+                old_new.append((old, new_o))
 
-                        nw_slice = (sanitize(position), *old_slices[1:])
-                    new_o = basic_subtensor(new_outs[pos], *nw_slice)
-                    if new_o.ndim > 0:
-                        new_o = new_o[:: cnf_slice[1]]
-                    old_new += [(old, new_o)]
-
-        # 3.7. Get replace pairs for all other nodes
+        # 3.5. Get replace pairs for all other nodes
         for idx, o in enumerate(node.outputs):
             if idx not in replaced_outs:
                 old_new += [(o, new_outs[idx])]

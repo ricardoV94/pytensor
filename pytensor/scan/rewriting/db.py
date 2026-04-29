@@ -12,6 +12,7 @@ from pytensor.graph.rewriting.db import EquilibriumDB, SequenceDB
 from pytensor.scan.op import Scan
 from pytensor.scan.rewriting.buffer_reduction import (
     scan_merge_subtensor_chain,
+    scan_reduce_nsteps,
     scan_save_mem_no_prealloc,
     scan_save_mem_prealloc,
     scan_sit_sot_to_untraced,
@@ -55,6 +56,15 @@ optdb.register("scan_eqopt1", scan_eqopt1, "fast_run", "scan", position=0.05)
 # We run before blas opt at 1.7 and specialize 2.0
 # but after stabilize at 1.5. Should we put it before stabilize?
 optdb.register("scan_eqopt2", scan_eqopt2, "fast_run", "scan", position=1.6)
+# Reduce n_steps before buffer reduction so indices are in negative form
+optdb.register(
+    "scan_reduce_nsteps",
+    dfs_rewriter(scan_reduce_nsteps, ignore_newtrees=True),
+    "fast_run",
+    "scan",
+    "scan_save_mem",
+    position=1.60,
+)
 # ScanSaveMem should execute only once per node.
 optdb.register(
     "scan_save_mem_prealloc",
