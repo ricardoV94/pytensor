@@ -19,7 +19,17 @@ from pytensor.graph.utils import MethodNotDefined
 from pytensor.link.c.op import COp
 from pytensor.link.c.params_type import ParamsType
 from pytensor.printing import Printer, pprint, set_precedence
-from pytensor.scalar.basic import ScalarConstant, ScalarVariable
+from pytensor.scalar.basic import (
+    Cast,
+    ScalarConstant,
+    ScalarVariable,
+)
+from pytensor.scalar.basic import (
+    Maximum as ScalarMaximum,
+)
+from pytensor.scalar.basic import (
+    Minimum as ScalarMinimum,
+)
 from pytensor.tensor import (
     TensorLike,
     _get_vector_length,
@@ -27,7 +37,9 @@ from pytensor.tensor import (
     get_vector_length,
 )
 from pytensor.tensor.basic import (
+    MakeVector,
     ScalarFromTensor,
+    TensorFromScalar,
     alloc,
     get_scalar_constant_value,
     nonzero,
@@ -36,11 +48,12 @@ from pytensor.tensor.basic import (
     constant as tensor_constant,
 )
 from pytensor.tensor.blockwise import vectorize_node_fallback
-from pytensor.tensor.elemwise import DimShuffle
+from pytensor.tensor.elemwise import DimShuffle, Elemwise
 from pytensor.tensor.exceptions import NotScalarConstantError
 from pytensor.tensor.math import add, clip
 from pytensor.tensor.shape import (
     Reshape,
+    Shape,
     Shape_i,
     specify_broadcastable,
 )
@@ -232,6 +245,54 @@ def as_index_literal(
 
 def get_idx_list(inputs, idx_list):
     return indices_from_subtensor(inputs[1:], idx_list)
+
+
+def _is_provably_non_negative(var) -> bool:
+    """``True`` when ``var`` can be statically shown to be non-negative.
+
+    Recognized cases:
+
+    - Python ``int`` / ``np.integer`` ``>= 0``.
+    - ``TensorConstant`` / ``ScalarConstant`` whose data is all ``>= 0``
+      (cached via ``tag.is_non_negative``).
+    - Unsigned-integer dtype.
+    - ``Shape`` / ``Shape_i`` outputs.
+    - ``MakeVector`` of provably non-negative inputs.
+    - View / shape-permutation ops — ``Subtensor``, ``ScalarFromTensor``,
+      ``TensorFromScalar``, ``DimShuffle`` — recurse to their input.
+    - ``Cast`` of a provably non-negative input.
+    - ``minimum(a, b)`` when both ``a`` and ``b`` are non-negative.
+    - ``maximum(a, b)`` when at least one of ``a``, ``b`` is non-negative.
+    """
+    if var is None:
+        return False
+    if isinstance(var, int | np.integer):
+        return bool(var >= 0)
+    if var.type.dtype.startswith("uint"):
+        return True
+    if isinstance(var, Constant):
+        cached: bool | None = getattr(var.tag, "is_non_negative", None)
+        if cached is not None:
+            return cached
+        result = bool((np.asarray(var.data) >= 0).all())
+        var.tag.is_non_negative = result
+        return result
+    op = var.owner_op
+    if isinstance(op, Shape | Shape_i):
+        return True
+    if isinstance(op, MakeVector):
+        return all(_is_provably_non_negative(i) for i in var.owner.inputs)
+    if isinstance(op, Subtensor | ScalarFromTensor | TensorFromScalar | DimShuffle):
+        return _is_provably_non_negative(var.owner.inputs[0])
+    if isinstance(op, Elemwise):
+        scalar_op = op.scalar_op
+        if isinstance(scalar_op, Cast):
+            return _is_provably_non_negative(var.owner.inputs[0])
+        if isinstance(scalar_op, ScalarMinimum):
+            return all(_is_provably_non_negative(i) for i in var.owner.inputs)
+        if isinstance(scalar_op, ScalarMaximum):
+            return any(_is_provably_non_negative(i) for i in var.owner.inputs)
+    return False
 
 
 @overload
