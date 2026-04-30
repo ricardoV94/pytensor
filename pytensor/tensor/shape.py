@@ -339,7 +339,21 @@ def shape_i(var, i, fgraph=None):
 
     """
     if fgraph and hasattr(fgraph, "shape_feature"):
-        return fgraph.shape_feature.get_shape(var, i)
+        shape_feature = fgraph.shape_feature
+        shape_of = shape_feature.shape_of
+
+        def recur(node):
+            if node.outputs[0] not in shape_of:
+                for inp in node.inputs:
+                    if inp.owner:
+                        recur(inp.owner)
+                # If the output var isn't marked as being in the graph,
+                # we need to add it in the ShapeFeature.
+                shape_feature.on_import(fgraph, node, "graph.ops.shape_i")
+
+        if var not in shape_of:
+            recur(var.owner)
+        return shape_of[var][i]
 
     # If we are not able to use the shape feature, we should not put
     # Shape_i in the graph. Otherwise, the shape feature optimization
