@@ -58,10 +58,9 @@ def introduce_explicit_core_shape_rv(fgraph, node):
     _next_rng, rv = node.outputs
     shape_feature: ShapeFeature | None = getattr(fgraph, "shape_feature", None)
     if shape_feature:
-        # Trailing ``op.ndim_supp`` dims are the core shape, cycle-broken.
-        core_shape = list(
-            shape_feature.unaliased_shape_tuple(rv, range(-op.ndim_supp, 0))
-        )
+        core_shape = [
+            shape_feature.get_shape(rv, -i - 1) for i in reversed(range(op.ndim_supp))
+        ]
     else:
         core_shape = op._supp_shape_from_params(op.dist_params(node))
 
