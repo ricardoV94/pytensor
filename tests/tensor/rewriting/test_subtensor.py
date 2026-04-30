@@ -178,11 +178,11 @@ def test_local_useless_inc_subtensor_increment_zeros():
     s = pt.zeros((2, 2))[:, :]
     o_shape = inc_subtensor(s, specify_shape(y, s.shape))
 
-    mode = get_default_mode().including("local_useless_inc_subtensor")
-    f_shape = function([y], o_shape, mode=mode)
-
-    topo = f_shape.maker.fgraph.toposort()
-    assert not any(isinstance(n.op, IncSubtensor) for n in topo)
+    result = utt.rewrite_test([y], [o_shape])
+    result.assert_equivalent_computations(
+        [specify_shape(y, (2, 2))], strict_dtype=False
+    )
+    result.assert_numerical_close([np.ones((2, 2))])
 
 
 def test_local_useless_inc_subtensor_no_opt():
@@ -190,41 +190,30 @@ def test_local_useless_inc_subtensor_no_opt():
     x = matrix("x")
     y = matrix("y")
 
+    # Stepped slice — can't be removed.
     s = x[:, ::2]
     o_shape = set_subtensor(s, specify_shape(y, s.shape))
-
-    mode = get_default_mode().including("local_useless_inc_subtensor")
-    f_shape = function([x, y], o_shape, mode=mode)
-
-    topo = f_shape.maker.fgraph.toposort()
-    assert any(isinstance(n.op, IncSubtensor) for n in topo)
-
-    out = f_shape([[2, 3, 6, 7]], [[8, 9]])
-    assert np.array_equal(out, np.asarray([[8, 3, 9, 7]]))
+    result = utt.rewrite_test([x, y], [o_shape])
+    result.assert_equivalent_computations([o_shape], strict_dtype=False)
+    result.assert_numerical_close([[[2, 3, 6, 7]], [[8, 9]]])
 
     # Increment with a non-constant target array, full slices collapse to x + y.
     s = x[:, :]
     o_shape = inc_subtensor(s, specify_shape(y, s.shape))
-
-    f_shape = function([x, y], o_shape, mode=mode)
-
-    topo = f_shape.maker.fgraph.toposort()
-    assert not any(isinstance(n.op, IncSubtensor) for n in topo)
-
-    out = f_shape([[1, 2], [3, 4]], [[10, 20], [30, 40]])
-    assert np.array_equal(out, np.asarray([[11, 22], [33, 44]]))
+    result = utt.rewrite_test([x, y], [o_shape])
+    result.assert_equivalent_computations(
+        [x + specify_shape(y, x.shape)], strict_dtype=False
+    )
+    result.assert_numerical_close([[[1, 2], [3, 4]], [[10, 20], [30, 40]]])
 
     # Increment with a non-zero constant target array, same collapse to x + y.
     s = pt.ones((2, 2))[:, :]
     o_shape = inc_subtensor(s, specify_shape(y, s.shape))
-
-    f_shape = function([y], o_shape, mode=mode)
-
-    topo = f_shape.maker.fgraph.toposort()
-    assert not any(isinstance(n.op, IncSubtensor) for n in topo)
-
-    out = f_shape([[10, 20], [30, 40]])
-    assert np.array_equal(out, np.asarray([[11, 21], [31, 41]]))
+    result = utt.rewrite_test([y], [o_shape])
+    result.assert_equivalent_computations(
+        [np.ones((1, 1)) + specify_shape(y, (2, 2))], strict_dtype=False
+    )
+    result.assert_numerical_close([[[10, 20], [30, 40]]])
 
 
 def test_local_add_of_sparse_write():
