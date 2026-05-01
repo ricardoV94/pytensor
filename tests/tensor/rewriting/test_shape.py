@@ -593,6 +593,108 @@ class TestSameShape:
             shape_feature.same_shape(x, o, 0, 1)
 
 
+class _NoShapeOp(Op):
+    """Op without ``infer_shape``."""
+
+    __props__ = ()
+
+    def make_node(self, *inputs):
+        return Apply(self, list(inputs), [inputs[0].type()])
+
+    def perform(self, node, inputs, outputs):
+        outputs[0][0] = inputs[0]
+
+
+_no_shape = _NoShapeOp()
+
+
+class TestShapeTransfer:
+    """When ``r`` is replaced by ``new_r`` whose Op has no
+    ``infer_shape``, ``ShapeFeature`` transfers shape dims from the
+    old variable where the expression only depends on inputs that the
+    new node also has.
+    """
+
+    def test_passthrough_transfer(self):
+        x = vector("x")
+        r = exp(x)
+        new_r = _no_shape(x)
+
+        fg = FunctionGraph([x], [r], clone=False)
+        sf = ShapeFeature()
+        fg.attach_feature(sf)
+        fg.replace(r, new_r, reason="test")
+
+        s0 = sf.get_shape(new_r, 0)
+        assert isinstance(s0.owner.op, Shape_i) and s0.owner.op.i == 0
+        assert s0.owner.inputs[0] is x
+        assert sf.same_shape(new_r, x, 0, 0)
+
+    def test_no_matching_input(self):
+        a = vector("a")
+        b = vector("b")
+        r = exp(a)
+        new_r = _no_shape(b)
+
+        fg = FunctionGraph([a, b], [r], clone=False)
+        sf = ShapeFeature()
+        fg.attach_feature(sf)
+        fg.replace(r, new_r, reason="test")
+
+        s0 = sf.get_shape(new_r, 0)
+        assert isinstance(s0.owner.op, Shape_i) and s0.owner.inputs[0] is new_r
+
+    def test_alloc_value_dep_not_transferred(self):
+        n = iscalar("n")
+        r = alloc(np.float64(0.0), n)
+        other = pt.tensor("other", dtype="float64", shape=(None,))
+        new_r = _no_shape(other)
+
+        fg = FunctionGraph([n, other], [r], clone=False)
+        sf = ShapeFeature()
+        fg.attach_feature(sf)
+        fg.replace(r, new_r, reason="test")
+
+        s0 = sf.get_shape(new_r, 0)
+        assert isinstance(s0.owner.op, Shape_i) and s0.owner.inputs[0] is new_r
+
+    def test_partial_transfer(self):
+        A = matrix("A")
+        B = matrix("B")
+        r = pt.dot(A, B)
+        new_r = _no_shape(A)
+
+        fg = FunctionGraph([A, B], [r], clone=False)
+        sf = ShapeFeature()
+        fg.attach_feature(sf)
+        fg.replace(r, new_r, reason="test")
+
+        s0 = sf.get_shape(new_r, 0)
+        assert isinstance(s0.owner.op, Shape_i) and s0.owner.op.i == 0
+        assert s0.owner.inputs[0] is A
+
+        s1 = sf.get_shape(new_r, 1)
+        assert isinstance(s1.owner.op, Shape_i) and s1.owner.inputs[0] is new_r
+
+        assert sf.same_shape(new_r, A, 0, 0)
+
+    def test_chained_transfer(self):
+        x = vector("x")
+        r = exp(x)
+        new_r = _no_shape(x)
+        newer_r = _no_shape(x)
+
+        fg = FunctionGraph([x], [r], clone=False)
+        sf = ShapeFeature()
+        fg.attach_feature(sf)
+        fg.replace(r, new_r, reason="test")
+        fg.replace(new_r, newer_r, reason="test")
+
+        s0 = sf.get_shape(newer_r, 0)
+        assert isinstance(s0.owner.op, Shape_i) and s0.owner.op.i == 0
+        assert s0.owner.inputs[0] is x
+
+
 def test_useless_specify_shape():
     x = tensor("x", shape=(None, 5, 3))
 
