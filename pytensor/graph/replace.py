@@ -11,6 +11,7 @@ from pytensor.graph.basic import (
 from pytensor.graph.fg import FunctionGraph
 from pytensor.graph.op import Op
 from pytensor.graph.traversal import (
+    general_toposort,
     toposort,
     truncated_graph_inputs,
 )
@@ -210,6 +211,70 @@ def graph_replace(
         return list(fg.outputs)
     else:
         return fg.outputs[0]
+
+
+def break_aliasing_cycles(
+    outputs: Sequence[Variable],
+    destroyers_of,
+) -> list[Variable]:
+    """Break aliasing-induced ordering cycles in ``outputs``.
+
+    When an inplace Op overwrites input ``x`` and a single Apply reads
+    both ``x`` and a transitive dependent of the destroyer's output,
+    no valid schedule exists. This re-routes ``x`` on that Apply through
+    ``deep_copy_op`` to lift the ordering conflict.
+    """
+    from pytensor.compile.ops import deep_copy_op
+
+    deps: dict[Variable, frozenset[Variable]] = {}
+    substitutes: dict[Variable, Variable] = {}
+    replacements: dict[Variable, Variable] = {}
+    for v in general_toposort(
+        outputs, lambda v: v.owner.inputs if v.owner is not None else []
+    ):
+        if v.owner is None:
+            deps[v] = frozenset()
+            continue
+        node = v.owner
+
+        d: set[Variable] = set()
+        for inp in node.inputs:
+            d |= deps[inp]
+            if inp.owner is not None and inp.owner.op.destroy_map:
+                d.add(inp)
+        deps[v] = frozenset(d)
+
+        if node.op.destroy_map:
+            continue
+
+        new_inputs = list(node.inputs)
+        changed = False
+        for i, inp in enumerate(node.inputs):
+            inp_destroyers = destroyers_of(inp)
+            if not inp_destroyers:
+                continue
+            other_deps: set[Variable] = set()
+            for j, other_inp in enumerate(node.inputs):
+                if j == i:
+                    continue
+                other_deps |= deps[other_inp]
+                if other_inp.owner is not None and other_inp.owner.op.destroy_map:
+                    other_deps.add(other_inp)
+            if any(
+                out in other_deps for c_app in inp_destroyers for out in c_app.outputs
+            ):
+                if inp not in substitutes:
+                    substitutes[inp] = cast(Variable, deep_copy_op(inp))
+                new_inputs[i] = substitutes[inp]
+                changed = True
+        if changed:
+            new_node = node.op.make_node(*new_inputs)
+            replacements.update(zip(node.outputs, new_node.outputs, strict=True))
+
+    if not replacements:
+        return list(outputs)
+
+    return graph_replace(list(outputs), replace=replacements)
 
 
 @singledispatch

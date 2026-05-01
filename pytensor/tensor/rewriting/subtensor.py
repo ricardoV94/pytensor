@@ -414,13 +414,10 @@ def local_subtensor_merge(fgraph, node):
 
     # Get the shapes of the vectors !
     try:
-        # try not to introduce new shape into the graph
-        xshape = fgraph.shape_feature.shape_of[x]
-        ushape = fgraph.shape_feature.shape_of[u]
+        xshape = fgraph.shape_feature.shape_tuple(x)
+        ushape = fgraph.shape_feature.shape_tuple(u)
     except AttributeError:
-        # Following the suggested use of shape_feature which should
-        # consider the case when the compilation mode doesn't
-        # include the ShapeFeature
+        # The compilation mode may not include the ShapeFeature
         xshape = x.shape
         ushape = u.shape
 
@@ -683,7 +680,7 @@ def local_useless_subtensor(fgraph, node):
     if not hasattr(fgraph, "shape_feature"):
         return
 
-    shape_of = fgraph.shape_feature.shape_of
+    shape_feature = fgraph.shape_feature
 
     cdata = get_constant_idx(
         node.op.idx_list,
@@ -705,7 +702,7 @@ def local_useless_subtensor(fgraph, node):
             # is not a useless subtensor
             return False
 
-        length_pos = shape_of[node.inputs[0]][pos]
+        length_pos = shape_feature.get_shape(node.inputs[0], pos)
 
         if isinstance(idx.stop, int | np.integer):
             length_pos_data = sys.maxsize
@@ -809,12 +806,12 @@ def local_useless_AdvancedSubtensor1(fgraph, node):
     if not hasattr(fgraph, "shape_feature"):
         return
 
-    shape_of = fgraph.shape_feature.shape_of
+    shape_feature = fgraph.shape_feature
 
     # get length of the indexed tensor along the first axis
     try:
         length = get_scalar_constant_value(
-            shape_of[node.inputs[0]][0], only_process_constants=True
+            shape_feature.get_shape(node.inputs[0], 0), only_process_constants=True
         )
     except NotScalarConstantError:
         return False
@@ -1640,7 +1637,6 @@ def local_useless_inc_subtensor_alloc(fgraph, node):
                 # need it for this optimization, so don't continue.
                 return False
 
-            shape_of = shape_feature.shape_of
             same_shape = shape_feature.same_shape
 
             # Get the subtensor of `x` indexed by `i` in order to compare
@@ -1654,22 +1650,12 @@ def local_useless_inc_subtensor_alloc(fgraph, node):
             else:
                 raise Exception("Should never happen!")
 
-            reason = "local_useless_incsubtensor_alloc"
-
-            # Add `xi` to the shape feature `fgraph`. This is important for
-            # shape inference later because the variable must be part of the
-            # function graph in order to call `same_shape` on it.
-            if xi not in shape_of:
-                shape_feature.on_import(fgraph, xi.owner, f"{reason}: add `xi`")
-
             # `xi` may have more dimensions than `y` since the subtensor ops
             # do automatic broadcasting of the increment internally. Thus, we
             # need to make the leading implicitly broadcasted dimensions
             # explicit for shape comparison later.
             if xi.ndim > y.ndim:
                 y = shape_padleft(y, xi.ndim - y.ndim)
-                if y not in shape_of:
-                    shape_feature.on_import(fgraph, y.owner, f"{reason}: add `y`")
 
             # Build `z_broad` explicitly to include extra implicit dimensions.
             z_broad = (True,) * (xi.ndim - z.ndim) + z.broadcastable
@@ -1702,7 +1688,7 @@ def local_useless_inc_subtensor_alloc(fgraph, node):
                 if (
                     z_broad[k]
                     and not same_shape(xi, y, dim_x=k, dim_y=k)
-                    and shape_of[y][k] != 1
+                    and shape_feature.get_shape(y, k) != 1
                 )
             ]
 
