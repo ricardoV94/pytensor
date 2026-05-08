@@ -19,7 +19,6 @@ from pytensor.scan.op import Scan, ScanInfo
 from pytensor.scan.rewriting import (
     ScanInplaceOptimizer,
     ScanMerge,
-    scan_merge_subtensor_chain,
     scan_remove_unused,
 )
 from pytensor.scan.utils import until
@@ -1764,11 +1763,11 @@ class TestScanInplaceOptimizer:
 
 
 class TestSaveMem:
-    # ``scan_save_mem`` relies on ``scan_merge_subtensor_chain`` having
-    # pre-merged the user's index chain. The latter only runs as part of
-    # ``scan_eqopt1`` (tag ``fast_run`` / ``scan``), so under FAST_COMPILE
-    # we'd test save_mem on a graph it wasn't designed for. Promote to
-    # FAST_RUN whenever the env says FAST_COMPILE.
+    # ``scan_save_mem`` relies on ``local_subtensor_merge_integer`` having
+    # collapsed the user's index chain (under the ``shape_unsafe`` tag, which
+    # ``fast_run`` enables). Under ``FAST_COMPILE`` that tag is off, so we'd
+    # test save_mem on a graph it wasn't designed for. Promote to FAST_RUN
+    # whenever the env says FAST_COMPILE.
     _base_mode = "FAST_RUN" if config.mode == "FAST_COMPILE" else config.mode
     mode = (
         get_mode(_base_mode)
@@ -1918,7 +1917,7 @@ class TestSaveMem:
             lambda xtm1: xtm1 + 1, outputs_info=[x0], n_steps=10, return_updates=False
         )
 
-        # xs[-3] triggers scan_merge_subtensor_chain → raw_out[-3]
+        # xs[-3] is folded by ``local_subtensor_merge_integer`` to ``raw_out[-3]``
         # then scan_reduce_nsteps reduces n_steps from 10 to 8
         # (need 8 iterations to reach the 3rd-from-last entry in
         # raw output [init, c0, ..., c9])
@@ -1930,35 +1929,6 @@ class TestSaveMem:
         assert isinstance(n_steps, Constant) and n_steps.data == 8
 
         np.testing.assert_allclose(fn(0), np.arange(1, 11)[-3])
-
-    def test_save_mem_chain_with_intermediate_trailing_slice(self):
-        # Regression: ``scan_merge_subtensor_chain`` must replay trailing-axis
-        # indices on intermediate ``Subtensor`` nodes. Apply only that rewrite
-        # to a fresh FunctionGraph so other rewriters (especially
-        # ``local_subtensor_merge``) can't pre-collapse the chain.
-        x0 = pt.vector("x0")
-        xs = scan(
-            lambda xtm1: xtm1 + 1,
-            outputs_info=[x0],
-            n_steps=10,
-            return_updates=False,
-        )
-        out = xs[1:][:, 1:][-1]
-
-        orig_fg = FunctionGraph(inputs=[x0], outputs=[out], clone=True)
-        rewr_fg = FunctionGraph(inputs=[x0], outputs=[out], clone=True)
-        in2out(scan_merge_subtensor_chain, ignore_newtrees=True).rewrite(rewr_fg)
-
-        # Confirm the rewrite triggered (would no-op without this fix because
-        # the only foldable chain on this graph carries an intermediate
-        # trailing slice).
-        assert not equal_computations(orig_fg.outputs, rewr_fg.outputs)
-
-        no_opt = Mode(linker="py", optimizer=None)
-        fn = function(rewr_fg.inputs, rewr_fg.outputs, mode=no_opt)
-        [result] = fn(np.zeros(3))
-        assert result.shape == (2,)
-        np.testing.assert_array_equal(result, np.full(2, 10.0))
 
     def test_save_mem_cannot_reduce_constant_number_of_steps(self):
         x0 = pt.scalar("x0")
@@ -2238,8 +2208,6 @@ class TestSaveMem:
 
         np.testing.assert_equal(f(n_steps=1000, x0=[1, 1]), 55)
         np.testing.assert_equal(f(n_steps=1, x0=[1, 1]), 2)
-        with pytest.raises(AssertionError, match="n_steps >= 1"):
-            f(n_steps=0, x0=[1, 1])
 
         # ys_trace is the buffer for the sit-sot output.
         # Buffer size = taps + 1 (prealloc) = 3 for C backend, 2 for JIT.
@@ -2388,8 +2356,9 @@ def test_scan_sit_sot_to_untraced():
     → converted). Result: 1 sit_sot, 1 nit_sot, 2 untraced_sit_sot.
     """
     # ``scan_sit_sot_to_untraced`` follows ``scan_save_mem``, which needs
-    # ``scan_merge_subtensor_chain`` to have run first; force a FAST_RUN
-    # base if the env is FAST_COMPILE.
+    # ``local_subtensor_merge_integer`` (under the ``shape_unsafe`` tag) to
+    # have folded the index chains first; force a FAST_RUN base if the env
+    # is FAST_COMPILE.
     base_mode = "FAST_RUN" if config.mode == "FAST_COMPILE" else config.mode
     mode = (
         get_mode(base_mode)

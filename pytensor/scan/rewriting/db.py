@@ -11,7 +11,6 @@ from pytensor.graph.rewriting.basic import EquilibriumGraphRewriter, dfs_rewrite
 from pytensor.graph.rewriting.db import EquilibriumDB, SequenceDB
 from pytensor.scan.op import Scan
 from pytensor.scan.rewriting.buffer_reduction import (
-    scan_merge_subtensor_chain,
     scan_reduce_nsteps,
     scan_save_mem_no_prealloc,
     scan_save_mem_prealloc,
@@ -171,12 +170,6 @@ scan_seqopt1.register(
     position=6,
 )
 
-scan_eqopt1.register(
-    "scan_merge_subtensor_chain",
-    dfs_rewriter(scan_merge_subtensor_chain, ignore_newtrees=True),
-    "fast_run",
-    "scan",
-)
 
 scan_eqopt2.register(
     "constant_folding_for_scan2",

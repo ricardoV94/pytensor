@@ -385,7 +385,7 @@ def test_inplace_taps(n_steps_constant):
                 node.inputs[idx] for idx in chain.from_iterable(dm.values())
             )
 
-    # ``scan_merge_subtensor_chain`` + ``scan_save_mem`` reduce the buffers
+    # ``local_subtensor_merge_integer`` + ``scan_save_mem`` reduce the buffers
     # the same way for both constant and symbolic ``n_steps`` (xs collapses
     # to an untraced sit_sot, the mit_sot buffers reduce to ``taps + 1``),
     # so inplace fires identically in both cases.

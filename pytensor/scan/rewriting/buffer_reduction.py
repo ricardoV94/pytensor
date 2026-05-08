@@ -3,9 +3,6 @@
 These rewrites drop work and storage that nothing downstream actually
 needs:
 
-* :func:`scan_merge_subtensor_chain` — fold ``scan_out[init_l:]…[const_idx]``
-  chains into a direct ``raw_out[final_idx]`` so ``scan_save_mem`` can see
-  through nested constant-bound subtensors.
 * :func:`scan_reduce_nsteps` — when every client of a Scan output reads a
   constant scalar index, shorten ``n_steps`` to the minimum that covers
   those reads and rewrite each client to a negative index against the
@@ -15,6 +12,10 @@ needs:
   ``n_steps`` to the smallest range any client actually reads.
 * :func:`scan_sit_sot_to_untraced` — convert sit_sot states whose
   history is unused into the cheaper ``untraced_sit_sot`` form.
+
+Subtensor chains rooted at scan outputs (e.g. ``raw_out[init_l:][-k]``)
+are folded by ``local_subtensor_merge_integer`` running in canonicalize
+under the ``shape_unsafe`` tag, before this module's rewrites see them.
 """
 
 import dataclasses
@@ -24,9 +25,8 @@ from typing import cast
 import pytensor.tensor as pt
 from pytensor.configdefaults import config
 from pytensor.graph.basic import Constant, Variable
-from pytensor.graph.rewriting.basic import copy_stack_trace, node_rewriter
+from pytensor.graph.rewriting.basic import node_rewriter
 from pytensor.graph.traversal import apply_depends_on
-from pytensor.raise_op import Assert
 from pytensor.scan.op import Scan
 from pytensor.scan.utils import expand_empty
 from pytensor.tensor.basic import (
@@ -88,268 +88,6 @@ def _python_slice_from_idx(entry):
             return None
         return slice(a, b, s)
     return _const_int_or_none(entry)
-
-
-def _enumerate_subtensor_chains(fgraph, root):
-    """Yield ``(terminal_node, chain_indices, trailings)`` for every chain of
-    ``Subtensor`` clients rooted at ``root`` whose first-dim entries are all
-    constant and whose terminal first-dim entry is a scalar.
-
-    ``chain_indices`` is a list of pure-Python slice / int objects (one per
-    chain step) describing the leading-axis index. ``trailings`` is a parallel
-    list of tuples — each tuple holds the idx_list entries past the first dim
-    for that step, to be replayed verbatim once the leading axis has been
-    folded.
-    """
-    stack = [(root, [], [])]
-    while stack:
-        var, prefix, trailings = stack.pop()
-        for client_node, _ in fgraph.clients.get(var, []):
-            if not isinstance(client_node.op, Subtensor):
-                continue
-            this_slice = get_idx_list(client_node.inputs, client_node.op.idx_list)
-            entry = _python_slice_from_idx(this_slice[0])
-            if entry is None:
-                continue
-            new_prefix = [*prefix, entry]
-            new_trailings = [*trailings, tuple(this_slice[1:])]
-            if isinstance(entry, slice):
-                stack.append((client_node.outputs[0], new_prefix, new_trailings))
-            else:
-                yield client_node, new_prefix, new_trailings
-
-
-@dataclasses.dataclass(slots=True)
-class _Affine:
-    """``const + coeff * raw_length`` with ``coeff >= 0``.
-
-    ``raw_length = n_steps + init_l`` is unknown at compile time;
-    we keep ``const`` and ``coeff`` as Python ints and reason symbolically.
-    """
-
-    const: int
-    coeff: int = 0
-
-    def __add__(self, other: "_Affine") -> "_Affine":
-        return _Affine(self.const + other.const, self.coeff + other.coeff)
-
-    def __sub__(self, other: "_Affine") -> "_Affine":
-        return _Affine(self.const - other.const, self.coeff - other.coeff)
-
-
-class _ChainFolder:
-    """Walk a chain of constant-bound subtensor slices symbolically.
-
-    Tracks the current view as ``(base, length, direction)`` against the
-    raw length, plus the smallest ``raw_length`` for which every bound seen
-    so far stays in range (``n_steps_min``). Each ``apply_*`` call mutates
-    the state; constraints accumulate via ``_require``.
-
-    When ``raw_length`` is known (constant ``n_steps``), pass it in so the
-    affine math collapses to plain integer arithmetic and ``n_steps_min``
-    stays at ``0``. When unknown, leave it ``None`` and the folder reasons
-    symbolically with ``length = 0 + 1 * raw_length``.
-    """
-
-    def __init__(self, raw_length: int | None = None):
-        self.base = _Affine(0)
-        self.length = _Affine(raw_length) if raw_length is not None else _Affine(0, 1)
-        self.direction = +1
-        self.n_steps_min = 0
-
-    @staticmethod
-    def _ceildiv(a: int, b: int) -> int:
-        """``ceil(a / b)`` for ``b > 0`` (any sign of ``a``)."""
-        return -(-a // b)
-
-    def _require(self, need: int) -> None:
-        if need > self.n_steps_min:
-            self.n_steps_min = need
-
-    def _normalize_forward(self, bound: int | None) -> _Affine:
-        """Clamp a slice bound for ``step >= 1`` to a non-negative position."""
-        if bound is None:
-            return self.length
-        const, coeff = self.length.const, self.length.coeff
-        if bound >= 0:
-            if coeff == 0:
-                return _Affine(min(bound, const))
-            self._require(self._ceildiv(bound - const, coeff))
-            return _Affine(bound)
-        # bound < 0: max(0, length + bound).
-        if coeff == 0:
-            return _Affine(max(0, const + bound))
-        self._require(self._ceildiv(-const - bound, coeff))
-        return _Affine(const + bound, coeff)
-
-    def _normalize_reverse(self, bound: int | None, *, is_start: bool) -> _Affine:
-        """Clamp a slice bound for ``step == -1``.
-
-        For ``[start:stop:-1]`` Python clamps ``start`` into ``[-1, length-1]``
-        and ``stop`` into ``[-1, length]``; defaults are ``start = length - 1``
-        and ``stop = -1``.
-        """
-        if bound is None:
-            return self.length - _Affine(1) if is_start else _Affine(-1)
-        const, coeff = self.length.const, self.length.coeff
-        if bound >= 0:
-            if coeff == 0:
-                return _Affine(min(bound, const - 1))
-            self._require(self._ceildiv(bound + 1 - const, coeff))
-            return _Affine(bound)
-        # bound < 0: max(-1, length + bound).
-        if coeff == 0:
-            return _Affine(max(-1, const + bound))
-        self._require(self._ceildiv(-1 - const - bound, coeff))
-        return _Affine(const + bound, coeff)
-
-    def apply_slice(self, sl: slice) -> bool:
-        """Fold one slice into the current view. Returns ``False`` for
-        ``sl.step`` not in ``{None, 1, -1}``.
-        """
-        step = 1 if sl.step is None else sl.step
-        if step == 1:
-            start = self._normalize_forward(sl.start)
-            stop = self._normalize_forward(sl.stop)
-            new_length = stop - start
-        elif step == -1:
-            start = self._normalize_reverse(sl.start, is_start=True)
-            stop = self._normalize_reverse(sl.stop, is_start=False)
-            new_length = start - stop
-        else:
-            return False
-
-        if new_length.coeff == 0 and new_length.const < 0:
-            new_length = _Affine(0)
-        self.base = self.base + start if self.direction == +1 else self.base - start
-        self.length = new_length
-        if step == -1:
-            self.direction = -self.direction
-        return True
-
-    def apply_index(self, k: int) -> _Affine | None:
-        """Fold the terminal scalar index into a raw-buffer position.
-
-        Returns ``None`` when ``k`` is provably out of range.
-        """
-        const, coeff = self.length.const, self.length.coeff
-        if k >= 0:
-            if coeff == 0 and k >= const:
-                return None
-            if coeff > 0:
-                self._require(self._ceildiv(k + 1 - const, coeff))
-            view_pos = _Affine(k)
-        else:
-            if coeff == 0 and -k > const:
-                return None
-            if coeff > 0:
-                self._require(self._ceildiv(-k - const, coeff))
-            view_pos = self.length + _Affine(k)
-        return self.base + view_pos if self.direction == +1 else self.base - view_pos
-
-
-@node_rewriter([Scan])
-def scan_merge_subtensor_chain(fgraph, scan_node):
-    """Fold ``scan_out[init_l:]…[const_idx]`` chains into ``scan_out[final_idx]``.
-
-    ``pytensor.scan`` strips the initial state (``raw_out[init_l:]``) before
-    returning. When client code writes ``result[…][k]`` the graph carries a
-    chain of ``Subtensor`` nodes that ``scan_save_mem`` cannot read past the
-    first strip. This rewrite walks each chain that bottoms out in a constant
-    scalar index, folds the constant-step slices in between, and replaces the
-    terminal client with a direct ``raw_out[final_idx]`` (plus an
-    ``Assert(n_steps >= …)`` when negative-index safety requires it).
-
-    ``local_subtensor_merge`` can't do this job: it's gated to fully-constant
-    bounds and shapes (see ``_can_merge_simply``) because the unconstrained
-    merge produces big switch/min/max trees on symbolic ``n_steps``, and Scan
-    outputs whose strip ``raw_out[init_l:]`` has symbolic shape fall outside
-    that gate. Folding here is safe because we know the structure (a leading
-    strip + scalar index) and can emit an ``Assert`` to discharge the
-    negative-index range check that ``local_subtensor_merge`` has no way to express.
-
-    Only constant slice bounds and step ∈ {None, 1, -1} are handled.
-    Non-foldable chains are left untouched.
-    """
-    op = scan_node.op
-
-    recurrent_outputs = op.outer_mitsot_outs(scan_node.outputs) + op.outer_sitsot_outs(
-        scan_node.outputs
-    )
-    recurrent_taps = op.info.mit_sot_in_slices + op.info.sit_sot_in_slices
-    nitsot_outputs = op.outer_nitsot_outs(scan_node.outputs)
-
-    n_steps = scan_node.inputs[0]
-    n_steps_const = _const_int_or_none(n_steps)
-    replacements: dict = {}
-
-    all_outputs = [
-        (x, abs(min(taps))) for x, taps in zip(recurrent_outputs, recurrent_taps)
-    ] + [(x, 0) for x in nitsot_outputs]
-
-    for scan_out, init_l in all_outputs:
-        raw_length_const = n_steps_const + init_l if n_steps_const is not None else None
-        for terminal_node, (
-            *chain_indices,
-            k,
-        ), trailings in _enumerate_subtensor_chains(fgraph, scan_out):
-            # Single-entry chain (just ``raw[k]``) means there's nothing to
-            # flatten -- ``scan_save_mem`` / ``scan_reduce_nsteps`` already
-            # handle the direct case and re-firing here would just re-wrap
-            # any required ``Assert`` ad infinitum.
-            if not chain_indices:
-                continue
-
-            # Walk the chain through a fresh folder. With ``raw_length_const``
-            # the affine math collapses to plain int arithmetic; without it,
-            # the folder reasons symbolically against an unknown raw length.
-            # ``_enumerate_subtensor_chains`` guarantees every entry but the
-            # last is a slice and the last is a scalar int.
-            folder = _ChainFolder(raw_length_const)
-            for entry in chain_indices:
-                if not folder.apply_slice(entry):
-                    return None
-            raw_pos = folder.apply_index(k)
-            if raw_pos is None:
-                return None
-            final_idx, coeff = raw_pos.const, raw_pos.coeff
-            # ``raw_pos = const + coeff * raw_length``; we can only emit a Python int.
-            # ``coeff == 0`` is a plain constant (positive or negative).
-            # ``coeff == 1, const < 0`` is the negative-form.
-            # Anything else is always out of range and unfoldable.
-            if not (coeff == 0 or (coeff == 1 and final_idx < 0)):
-                return None
-            # Convert the absolute raw position to negative-from-end form
-            # when raw_length is known so the while-scan check and downstream
-            # save_mem reasoning recognize "last position" uniformly.
-            if coeff == 0 and raw_length_const is not None:
-                final_idx -= raw_length_const
-
-            # While-scans: only views into last state (-1) or into initial buffer are safe
-            # under early exit. No other case can be ensured from n_steps alone
-            if op.info.as_while and not (final_idx == -1 or 0 <= final_idx <= init_l):
-                continue
-
-            # Move the final idx into the scan buffer output
-            new_out = scan_out[final_idx]
-            for trailing in trailings:
-                # then replay each step's trailing-axis indices.
-                if trailing:
-                    new_out = new_out[trailing]
-
-            # The folder tracks a static minimum on raw_length;
-            # convert to a minimum on ``n_steps`` (raw_length = n_steps + init_l).
-            if (n_steps_min := max(0, folder.n_steps_min - init_l)) > 0:
-                # For the index to be valid scan needs at least this many steps
-                assert_op = Assert(f"n_steps >= {n_steps_min}")
-                new_out = assert_op(new_out, n_steps >= n_steps_min)
-
-            copy_stack_trace(
-                [terminal_node.outputs[0], terminal_node.inputs[0]], new_out
-            )
-            replacements[terminal_node.outputs[0]] = new_out
-
-    return replacements or None
 
 
 def _is_default_scan_buffer(final_buffer: TensorVariable, taps: int) -> bool:
@@ -638,7 +376,7 @@ def _strip_chain_negative_start(cl, init_l_i, raw_length_const, fgraph):
     ``xs`` (the computed-only steps) rather than the raw buffer with the
     initial state prepended.
 
-    Why scan_save_mem rather than scan_merge_subtensor_chain: pre-folding
+    Why save_mem-side rather than upstream pre-folding: pre-folding
     to a static ``out[-k:]`` would change semantics — when ``n_steps < k``
     the original chain clamps to ``n_steps`` elements, but ``out[-k:]``
     against the original buffer always returns ``k``.

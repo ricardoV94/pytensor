@@ -1,5 +1,4 @@
 from pytensor.scan.rewriting.buffer_reduction import (
-    scan_merge_subtensor_chain,
     scan_reduce_nsteps,
     scan_save_mem_no_prealloc,
     scan_save_mem_prealloc,
