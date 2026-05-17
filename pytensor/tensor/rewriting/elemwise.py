@@ -943,6 +943,71 @@ class FusionOptimizer(GraphRewriter):
         print(blanc, " time_toposort", prof[7], file=stream)
 
 
+@node_rewriter([elemwise_of(Composite)])
+def local_deduplicate_composite_io(fgraph, node):
+    """Deduplicate inputs and outputs of a Composite Elemwise node.
+
+    When the same outer variable feeds multiple input slots, the inner graph
+    is rewired to use a single inner variable. When multiple outputs resolve
+    to the same inner variable (via FrozenFunctionGraph interning), redundant
+    output slots are collapsed.
+    """
+    comp = node.op.scalar_op
+    changed = False
+
+    # --- Deduplicate inputs ---
+    seen: dict[int, int] = {}
+    input_replacements = {}
+    for i, outer_inp in enumerate(node.inputs):
+        first_idx = seen.get(id(outer_inp))
+        if first_idx is not None:
+            input_replacements[comp.inputs[i]] = comp.inputs[first_idx]
+        else:
+            seen[id(outer_inp)] = i
+
+    if input_replacements:
+        changed = True
+        keep_idxs = sorted(seen.values())
+        new_inner_inputs = [comp.inputs[i] for i in keep_idxs]
+        new_outer_inputs = [node.inputs[i] for i in keep_idxs]
+        new_inner_outputs = clone_replace(
+            list(comp.outputs), replace=input_replacements
+        )
+    else:
+        new_inner_inputs = list(comp.inputs)
+        new_outer_inputs = list(node.inputs)
+        new_inner_outputs = list(comp.outputs)
+
+    # --- Deduplicate outputs ---
+    # After Composite construction, FrozenFunctionGraph interning may collapse
+    # structurally identical output computations to the same variable.
+    new_composite = Composite(new_inner_inputs, new_inner_outputs)
+    unique_outputs = []
+    output_index_map = []
+    for out in new_composite.outputs:
+        for j, u in enumerate(unique_outputs):
+            if out is u:
+                output_index_map.append(j)
+                break
+        else:
+            output_index_map.append(len(unique_outputs))
+            unique_outputs.append(out)
+
+    if len(unique_outputs) < len(new_composite.outputs):
+        changed = True
+        new_composite = Composite(new_composite.inputs, unique_outputs)
+
+    if not changed:
+        return None
+
+    new_outs = Elemwise(new_composite)(*new_outer_inputs, return_list=True)
+
+    # Map old outputs to new (possibly deduplicated) outputs
+    return {
+        old_out: new_outs[output_index_map[i]] for i, old_out in enumerate(node.outputs)
+    }
+
+
 @register_canonicalize
 @register_specialize
 @node_rewriter([elemwise_of(Composite)])
@@ -1181,6 +1246,13 @@ fuse_seqopt.register(
     "fast_run",
     "fusion",
     position=1,
+)
+fuse_seqopt.register(
+    "local_deduplicate_composite_io",
+    in2out(local_deduplicate_composite_io),
+    "fast_run",
+    "fusion",
+    position=1.5,
 )
 fuse_seqopt.register(
     "local_useless_composite_outputs",
