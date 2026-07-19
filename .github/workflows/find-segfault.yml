@@ -1,0 +1,260 @@
+# TEMPORARY - debugging workflow for the numba-link LLVM crash. Delete before merging.
+#
+# Reproduces the `mode CVM : py3.12 : ubuntu-latest : numba link` job environment
+# exactly, but with core dumps, a gdb backtrace and host telemetry, so that a
+# crash inside LLVM's optimizer names a native frame instead of just a Python one.
+#
+#   push without `[hunt]` -> only `smoke` runs (validates the harness)
+#   push with    `[hunt]` -> `hunt` matrix runs (many parallel attempts)
+name: Find Segfault
+
+on:
+  push:
+    branches:
+      - find_segfault
+
+permissions: {}
+
+env:
+  # Same flags the real numba-link job exports.
+  BASE_PYTENSOR_FLAGS: linker=cvm,on_opt_error=raise,on_shape_error=raise,gcc__cxxflags=-pipe
+
+jobs:
+  smoke:
+    name: "Smoke: harness self-test"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: mamba-org/setup-micromamba@d7c9bd84e824b79d2af72a2d4196c7f4300d3476 # v3.0.0
+        with:
+          environment-name: pytensor-test
+          micromamba-version: "1.5.10-0"
+          init-shell: bash
+          post-cleanup: "all"
+          create-args: python=3.12
+
+      - name: Install dependencies
+        shell: micromamba-shell {0}
+        run: |
+          micromamba install --yes -q "python~=3.12" numpy "scipy<1.17.0" "numba>=0.63" \
+            pip graphviz cython pytest coverage pytest-cov pytest-benchmark pytest-mock \
+            pytest-sphinx mkl mkl-service rich
+          pip install -e ./
+          python -c 'import numba, llvmlite; print("numba", numba.__version__, "llvmlite", llvmlite.__version__)'
+
+      - name: Enable core dumps and install gdb
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gdb
+          sudo sysctl -w kernel.core_pattern=/tmp/core.%e.%p
+          sudo sysctl -w kernel.core_uses_pid=1
+          echo "core_pattern=$(cat /proc/sys/kernel/core_pattern)"
+
+      - name: Host telemetry
+        run: |
+          echo "--- cpu ---";    grep -m1 "model name" /proc/cpuinfo; nproc
+          echo "--- flags ---";  grep -m1 ^flags /proc/cpuinfo | tr ' ' '\n' | grep -cE "avx512" || true
+          echo "--- memory ---"; free -m
+          echo "--- limits ---"; bash -c 'ulimit -a'
+
+      # The point of the smoke job: crash on purpose and prove we can see it.
+      # If this step cannot produce a backtrace, the hunt job is worthless.
+      - name: Harness self-test - deliberate SIGSEGV must yield a backtrace
+        shell: micromamba-shell {0}
+        run: |
+          set +e
+          ulimit -c unlimited
+          python -X faulthandler -c 'import ctypes; ctypes.string_at(0)'
+          rc=$?
+          echo "exit code: $rc (expected 139)"
+          set -e
+
+          shopt -s nullglob
+          cores=(/tmp/core.*)
+          if [ ${#cores[@]} -eq 0 ]; then
+            echo "::error::HARNESS BROKEN - no core dump produced by a known SIGSEGV"
+            exit 1
+          fi
+          echo "core: ${cores[0]} ($(stat -c%s "${cores[0]}") bytes)"
+
+          gdb -batch -ex "thread apply all bt full" -ex "info registers" \
+              "$(which python)" "${cores[0]}" > /tmp/smoke-backtrace.txt 2>&1
+          echo "--- backtrace head ---"
+          head -30 /tmp/smoke-backtrace.txt
+
+          if ! grep -qE "^#[0-9]+ " /tmp/smoke-backtrace.txt; then
+            echo "::error::HARNESS BROKEN - gdb produced no stack frames"
+            exit 1
+          fi
+          echo "harness OK: core captured and gdb produced frames"
+          rm -f /tmp/core.*
+
+      # Confirm the real workload runs here, and time/measure the suspect test.
+      - name: Sanity - run test_sort.py and measure the suspect compile
+        shell: micromamba-shell {0}
+        run: |
+          ulimit -c unlimited
+          export PYTENSOR_FLAGS=$BASE_PYTENSOR_FLAGS
+          /usr/bin/time -v python -m pytest tests/link/numba/test_sort.py \
+            -r A --verbose --durations=20 2>&1 | tail -40
+        env:
+          MKL_THREADING_LAYER: GNU
+          MKL_NUM_THREADS: 1
+          OMP_NUM_THREADS: 1
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-backtrace
+          path: /tmp/smoke-backtrace.txt
+          if-no-files-found: warn
+
+  hunt:
+    # Only runs when the commit message opts in, so a harness fix does not burn
+    # a full matrix.
+    if: contains(github.event.head_commit.message, '[hunt]')
+    name: "Hunt ${{ matrix.variant }} #${{ matrix.attempt }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each attempt is an independent sample of a ~5%/run event.
+        attempt: [1, 2, 3, 4, 5, 6, 7, 8]
+        variant: [baseline, bigstack, unpatched]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: mamba-org/setup-micromamba@d7c9bd84e824b79d2af72a2d4196c7f4300d3476 # v3.0.0
+        with:
+          environment-name: pytensor-test
+          micromamba-version: "1.5.10-0"
+          init-shell: bash
+          post-cleanup: "all"
+          create-args: python=3.12
+
+      - name: Install dependencies
+        shell: micromamba-shell {0}
+        run: |
+          micromamba install --yes -q "python~=3.12" numpy "scipy<1.17.0" "numba>=0.63" \
+            pip graphviz cython pytest coverage pytest-cov pytest-benchmark pytest-mock \
+            pytest-sphinx mkl mkl-service rich
+          pip install -e ./
+
+      - name: Enable core dumps and install gdb
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gdb
+          sudo sysctl -w kernel.core_pattern=/tmp/core.%e.%p
+
+      - name: Host telemetry
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          free -m | head -2
+          nproc
+
+      # `unpatched` restores numba's original pointer_add, so a crash that only
+      # happens with the patch shows up as a variant asymmetry.
+      - name: Write unpatch plugin
+        if: matrix.variant == 'unpatched'
+        run: |
+          cat > "$GITHUB_WORKSPACE/unpatch_pointer_add.py" <<'PLUGIN'
+          import pytensor.link.numba.dispatch  # noqa: F401  (applies the patch)
+
+          from numba.core import cgutils
+
+
+          def _pointer_add_orig(builder, ptr, offset, return_type=None):
+              intptr = builder.ptrtoint(ptr, cgutils.intp_t)
+              if isinstance(offset, int):
+                  offset = cgutils.intp_t(offset)
+              intptr = builder.add(intptr, offset)
+              return builder.inttoptr(intptr, return_type or ptr.type)
+
+
+          cgutils.pointer_add = _pointer_add_orig
+          print(f"[unpatch] cgutils.pointer_add -> {cgutils.pointer_add.__name__}")
+          PLUGIN
+
+      - name: Run numba link suite
+        id: run
+        shell: micromamba-shell {0}
+        continue-on-error: true
+        run: |
+          ulimit -c unlimited
+          if [ "$VARIANT" = "bigstack" ]; then ulimit -s 65536; fi
+          echo "stack limit: $(ulimit -s)  core limit: $(ulimit -c)"
+
+          export PYTENSOR_FLAGS=$BASE_PYTENSOR_FLAGS
+          PLUGIN_ARG=""
+          if [ "$VARIANT" = "unpatched" ]; then
+            export PYTHONPATH="$GITHUB_WORKSPACE"
+            PLUGIN_ARG="-p unpatch_pointer_add"
+          fi
+
+          set +e
+          /usr/bin/time -v python -m pytest tests/link/numba --ignore=tests/link/numba/linalg \
+            -r A --verbose --runslow --durations=50 --benchmark-skip $PLUGIN_ARG \
+            > /tmp/pytest.log 2>&1
+          rc=$?
+          set -e
+          echo "exit code: $rc"
+          echo "rc=$rc" >> $GITHUB_OUTPUT
+
+          echo "--- peak memory ---"
+          grep -E "Maximum resident|Elapsed \(wall" /tmp/pytest.log || true
+          echo "--- tail ---"
+          tail -40 /tmp/pytest.log
+
+          if [ $rc -ge 128 ]; then
+            echo "::warning::CRASH REPRODUCED (exit $rc) on ${VARIANT} attempt ${ATTEMPT}"
+          fi
+        env:
+          MKL_THREADING_LAYER: GNU
+          MKL_NUM_THREADS: 1
+          OMP_NUM_THREADS: 1
+          VARIANT: ${{ matrix.variant }}
+          ATTEMPT: ${{ matrix.attempt }}
+
+      - name: Backtrace the crash
+        if: always()
+        shell: micromamba-shell {0}
+        run: |
+          shopt -s nullglob
+          cores=(/tmp/core.*)
+          if [ ${#cores[@]} -eq 0 ]; then
+            echo "no core dump (run did not crash)"
+            exit 0
+          fi
+          for c in "${cores[@]}"; do
+            echo "=================== $c ==================="
+            gdb -batch \
+                -ex "thread apply all bt full" \
+                -ex "info registers" \
+                -ex "info sharedlibrary" \
+                "$(which python)" "$c" 2>&1 | head -400
+          done | tee /tmp/backtrace.txt
+
+          echo "--- frame count (deep recursion => stack exhaustion) ---"
+          grep -cE "^#[0-9]+ " /tmp/backtrace.txt || true
+
+      - name: Upload crash artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hunt-${{ matrix.variant }}-${{ matrix.attempt }}
+          path: |
+            /tmp/pytest.log
+            /tmp/backtrace.txt
+          if-no-files-found: warn
