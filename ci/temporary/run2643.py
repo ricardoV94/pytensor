@@ -71,8 +71,6 @@ def main():
         metadata["cpu_info"] = subprocess.check_output(
             ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
         ).strip()
-    if sys.platform == "darwin" or sys.platform == "win32":
-        metadata["processor"] = metadata["cpu_info"]
     else:
         metadata["cpu_info"] = subprocess.check_output(
             [
@@ -83,6 +81,8 @@ def main():
             ],
             text=True,
         ).strip()
+    if sys.platform == "darwin" or sys.platform == "win32":
+        metadata["processor"] = metadata["cpu_info"]
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2))
     print(
         json.dumps(
