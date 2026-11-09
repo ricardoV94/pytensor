@@ -1,0 +1,55 @@
+name: Temporary PR 2643 benchmarks
+
+on:
+  push:
+    branches: [ci/2643-special-benchmark]
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86
+            runner: ubuntu-24.04
+            architecture: x86_64
+          - name: linux-arm
+            runner: ubuntu-24.04-arm
+            architecture: arm64
+          - name: windows-x86
+            runner: windows-2025
+            architecture: x86_64
+          - name: macos-arm
+            runner: macos-15
+            architecture: arm64
+    env:
+      NUMBA_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13"
+      - name: Install pinned benchmark dependencies
+        run: python -m pip install --only-binary=:all: "numpy==2.5.4" "scipy==1.18.1" "numba==0.68.1" "llvmlite==0.50.0" setuptools filelock psutil
+      - name: Run unchanged reviewer benchmark against both commits
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: python ci/temporary/run2643.py --output benchmark-results
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pr2643-${{ matrix.name }}
+          path: benchmark-results/
+          retention-days: 14
