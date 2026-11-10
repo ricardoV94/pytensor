@@ -28,11 +28,13 @@ jobs:
           python -m pip install --only-binary=:all:
           "numpy==2.5.4" "scipy==1.18.1" "numba==0.68.1" "llvmlite==0.50.0"
           setuptools filelock
-      - name: Measure matched ranges and fusion
-        run: python ci/temporary/run_erfc_diagnostic.py
+      - name: Interleave implementations on identical arrays
+        env:
+          PYTHONPATH: .
+        run: python ci/temporary/erfc_paired.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: erfc-macos-diagnostic
+          name: erfc-macos-paired
           path: erfc-diagnostic-results/
           retention-days: 14
