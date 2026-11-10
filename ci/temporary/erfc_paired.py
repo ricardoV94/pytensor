@@ -135,13 +135,16 @@ def main():
     summary = []
     for name, (kind, data) in cases.items():
         timings = {label: [] for label in labels}
-        for _ in range(25):
+        cpu_timings = {label: [] for label in labels}
+        for _ in range(75):
             for label in rng.permutation(labels):
                 fn = functions[label][kind]
                 start = time.perf_counter()
-                for _ in range(3):
+                cpu_start = time.process_time()
+                for _ in range(9):
                     fn(data)
-                timings[label].append((time.perf_counter() - start) / 3)
+                cpu_timings[label].append((time.process_time() - cpu_start) / 9)
+                timings[label].append((time.perf_counter() - start) / 9)
         medians = {label: float(np.median(times)) for label, times in timings.items()}
         row = {
             "case": name,
@@ -150,10 +153,21 @@ def main():
                 label: medians["libm"] / value for label, value in medians.items()
             },
             "samples": timings,
+            "cpu_milliseconds": {
+                label: float(np.median(times)) * 1000
+                for label, times in cpu_timings.items()
+            },
+            "cpu_samples": cpu_timings,
         }
         summary.append(row)
         print(
-            json.dumps({key: value for key, value in row.items() if key != "samples"}),
+            json.dumps(
+                {
+                    key: value
+                    for key, value in row.items()
+                    if not key.endswith("samples")
+                }
+            ),
             flush=True,
         )
     (output / "summary.json").write_text(json.dumps(summary, indent=2))
