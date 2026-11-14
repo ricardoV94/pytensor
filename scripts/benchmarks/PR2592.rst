@@ -1,0 +1,41 @@
+Scalar optimization comparison (PR #2592)
+========================================
+
+This run compares base ``b273b3b342c41c8fcc26e8504fcf65aaac4e9910``
+with head ``8f89089e495b9e2b1aaa5793757a28320257a168``, using the runner
+from PR #2652 (``82579188c8f3867706e440c06dde06c2d001f044``).
+
+``scalar_optimize.py`` mirrors the main scalar solver tests: eight root
+methods and five minimization configurations (Brent automatic, two-point
+search, three-point bracket, Golden, bounded), in float64. Float32 covers
+the three open root methods and all five minimization configurations.
+The base's float32 bracketing roots fail with an unboxing TypeError due to
+the returned dtype, which this PR fixes, so they have no baseline timing.
+Each function returns the solution, success flag and implicit gradient.
+Three scalar parameter values (0.75, 1, 1.25) exercise each function.
+The array-size setting does not affect these scalar workloads.
+
+Solutions and gradients are checked against a SciPy root reference and
+analytic minimizer/implicit-gradient formulas. Float32 uses a looser
+solver tolerance (1e-5) on both revisions and numerical checks suitable
+for float32 objective rounding. Invalid runtime inputs are covered by
+the PR's tests rather than this successful-solve timing comparison.
+
+Two rounds reverse revision order. Each function/round has an empty-cache
+process followed by a fresh reload process. Measurements include build,
+first call, combined ready time, reload status, compilation events,
+steady execution (15 batches of 30 calls per point), and phase RSS.
+See ``README.rst`` for measurement scopes and sampling limitations.
+
+The branch-specific push trigger runs Linux x86-64, Linux ARM64,
+Windows x86-64, and macOS ARM64 in the fork. Dependencies retain the
+template's pinned versions. All revisions, raw samples, configuration,
+cache evidence and memory measurements are uploaded as artifacts.
+
+Local command in an existing environment::
+
+    python scripts/benchmarks/compare.py \
+      --base b273b3b342c41c8fcc26e8504fcf65aaac4e9910 \
+      --head 8f89089e495b9e2b1aaa5793757a28320257a168 \
+      --case-file scripts/benchmarks/scalar_optimize.py \
+      --batches 15 --calls 30 --output benchmark-results

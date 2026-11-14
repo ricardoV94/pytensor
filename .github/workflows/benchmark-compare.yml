@@ -1,6 +1,8 @@
 name: Benchmark revision comparison
 
 on:
+  push:
+    branches: [bench/pr2592-cross-os]
   workflow_dispatch:
     inputs:
       repository:
@@ -8,13 +10,14 @@ on:
         default: pymc-devs/pytensor
       base_ref:
         description: Base revision or ref
-        default: main
+        default: b273b3b342c41c8fcc26e8504fcf65aaac4e9910
       head_ref:
         description: Candidate revision or ref (for example refs/pull/2647/head)
         required: true
+        default: 8f89089e495b9e2b1aaa5793757a28320257a168
       case_file:
         description: Case file from this workflow's checkout
-        default: scripts/benchmarks/special.py
+        default: scripts/benchmarks/scalar_optimize.py
       runners:
         description: Runner labels as a JSON array (select one to retry a platform)
         default: '["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025", "macos-15"]'
@@ -23,10 +26,10 @@ permissions:
   contents: read
 
 env:
-  BENCH_REPOSITORY: ${{ inputs.repository }}
-  BENCH_BASE: ${{ inputs.base_ref }}
-  BENCH_HEAD: ${{ inputs.head_ref }}
-  BENCH_CASE: ${{ inputs.case_file }}
+  BENCH_REPOSITORY: ${{ inputs.repository || 'pymc-devs/pytensor' }}
+  BENCH_BASE: ${{ inputs.base_ref || 'b273b3b342c41c8fcc26e8504fcf65aaac4e9910' }}
+  BENCH_HEAD: ${{ inputs.head_ref || '8f89089e495b9e2b1aaa5793757a28320257a168' }}
+  BENCH_CASE: ${{ inputs.case_file || 'scripts/benchmarks/scalar_optimize.py' }}
 
 jobs:
   resolve:
@@ -49,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.runners) }}
+        os: ${{ fromJSON(inputs.runners || '["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025", "macos-15"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -72,6 +75,7 @@ jobs:
           python scripts/benchmarks/compare.py
           --repository "$BENCH_REPOSITORY" --base "$BASE_SHA" --head "$HEAD_SHA"
           --case-file "$BENCH_CASE" --output benchmark-results
+          --batches 15 --calls 30
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
